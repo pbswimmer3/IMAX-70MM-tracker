@@ -1,0 +1,145 @@
+:root {
+  --ground: #0a0a0c;
+  --panel: #141317;
+  --border: #2a2822;
+  --cream: #ece3cf;
+  --muted: #b9af95;
+  --dim: #7a7263;
+  --amber: #f0a63c;
+  --safelight: #e24a34;
+  --font-mono: "Courier New", Courier, monospace;
+  --font-serif: Georgia, "Times New Roman", serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  padding: 0;
+  margin: 0;
+  background-color: var(--ground);
+  color: var(--cream);
+  font-family: var(--font-sans);
+}
+
+a {
+  color: var(--amber);
+}
+
+.container {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 48px 24px;
+}
+
+.panel {
+  background-color: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 24px;
+  margin-bottom: 20px;
+}
+
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 2px;
+  color: var(--amber);
+  text-transform: uppercase;
+  margin: 0 0 8px 0;
+}
+
+h1 {
+  font-family: var(--font-serif);
+  font-size: 32px;
+  margin: 0 0 12px 0;
+}
+
+h2 {
+  font-family: var(--font-serif);
+  font-size: 20px;
+  margin: 0 0 12px 0;
+}
+
+p {
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.btn {
+  display: inline-block;
+  background-color: var(--amber);
+  color: var(--ground);
+  font-weight: bold;
+  padding: 12px 22px;
+  border-radius: 4px;
+  border: none;
+  text-decoration: none;
+  cursor: pointer;
+  font-size: 14px;
+  font-family: var(--font-sans);
+}
+
+.btn.secondary {
+  background-color: transparent;
+  color: var(--cream);
+  border: 1px solid var(--border);
+}
+
+table.mono {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 14px;
+}
+
+table.mono td,
+table.mono th {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+
+.theatre-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.theatre-row:last-child {
+  border-bottom: none;
+}
+
+.badge {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+form.simple label {
+  display: block;
+  font-size: 13px;
+  color: var(--muted);
+  margin: 12px 0 4px 0;
+}
+
+form.simple input,
+form.simple textarea {
+  width: 100%;
+  background-color: var(--ground);
+  color: var(--cream);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}

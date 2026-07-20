@@ -1,0 +1,147 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Auth.js canonical models ----------
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+
+  accounts      Account[]
+  sessions      Session[]
+  subscriptions Subscription[]
+  reminders     Reminder[]
+}
+
+model Account {
+  id                       String  @id @default(cuid())
+  userId                   String
+  type                     String
+  provider                 String
+  providerAccountId        String
+  refresh_token            String? @db.Text
+  access_token             String? @db.Text
+  expires_at               Int?
+  token_type               String?
+  scope                    String?
+  id_token                 String? @db.Text
+  session_state            String?
+  refresh_token_expires_in Int?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ---------- App models ----------
+
+model Theatre {
+  id         String   @id @default(cuid())
+  chain      String
+  name       String
+  externalId String
+  city       String
+  priority   Int
+
+  showtimes  Showtime[]
+  dropEvents DropEvent[]
+
+  @@unique([chain, externalId])
+}
+
+model Movie {
+  id        String   @id @default(cuid())
+  title     String
+  slug      String   @unique
+  active    Boolean  @default(true)
+  matchers  Json
+  createdAt DateTime @default(now())
+
+  subscriptions Subscription[]
+  showtimes     Showtime[]
+  dropEvents    DropEvent[]
+}
+
+model Subscription {
+  id        String   @id @default(cuid())
+  userId    String
+  movieId   String
+  theatreId String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  movie Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, movieId, theatreId])
+}
+
+model Showtime {
+  id           String   @id @default(cuid())
+  movieId      String
+  theatreId    String
+  chain        String
+  externalId   String
+  startsAt     DateTime
+  format       String
+  bookingUrl   String?
+  firstSeenAt  DateTime @default(now())
+
+  movie   Movie   @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  theatre Theatre @relation(fields: [theatreId], references: [id], onDelete: Cascade)
+
+  @@unique([theatreId, externalId])
+}
+
+model DropEvent {
+  id         String   @id @default(cuid())
+  movieId    String
+  theatreId  String
+  detectedAt DateTime @default(now())
+
+  movie     Movie      @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  theatre   Theatre    @relation(fields: [theatreId], references: [id], onDelete: Cascade)
+  reminders Reminder[]
+
+  @@unique([movieId, theatreId])
+}
+
+model Reminder {
+  id          String    @id @default(cuid())
+  userId      String
+  dropEventId String
+  sentCount   Int       @default(0)
+  lastSentAt  DateTime?
+  dismissed   Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  dropEvent DropEvent @relation(fields: [dropEventId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dropEventId])
+}
