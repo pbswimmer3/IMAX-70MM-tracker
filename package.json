@@ -9,6 +9,7 @@
     "db:push": "prisma db push",
     "db:seed": "tsx prisma/seed.ts",
     "resolve:amc": "tsx scripts/resolve-amc.ts",
+    "test:sources": "tsx scripts/test-sources.ts",
     "lint": "next lint"
   },
   "dependencies": {

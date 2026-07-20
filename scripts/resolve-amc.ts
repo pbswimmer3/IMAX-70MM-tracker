@@ -1,12 +1,22 @@
 /**
- * Resolve AMC numeric theatreIds for the AMC theatres in lib/theatres.ts.
+ * Help fill the AMC numeric theatreIds in lib/theatres.ts.
  *
- * AMC's public site uses name slugs, but api.amctheatres.com needs the numeric
- * theatreId. This script uses your vendor key to look each AMC theatre up by
- * name and prints the id to paste into lib/theatres.ts (replacing the *_TODO
- * placeholders). Then re-run `npm run db:seed`.
+ * AMC's public site + catalog endpoints sit behind a WAF and the "list/search
+ * theatres" catalog API is a SEPARATE grant from the free Showtimes tier — so a
+ * keyed request to it commonly returns HTTP 403. This script therefore does two
+ * things:
  *
- * Usage: AMC_VENDOR_KEY=... npm run resolve:amc
+ *   1) `npm run resolve:amc`            → try a name search (verbose), and if it's
+ *                                          blocked, print the browser recipe.
+ *   2) `npm run resolve:amc -- 3210 …`  → VERIFY one or more candidate ids you
+ *                                          grabbed from the browser, using your
+ *                                          Showtimes key (which IS authorized for
+ *                                          /theatres/{id}/showtimes/{date}). Prints
+ *                                          the theatre name so you can confirm.
+ *
+ * Browser recipe (never blocked): open the theatre's /showtimes page, DevTools →
+ * Network → filter "api.amctheatres" → the request URL is
+ * .../v2/theatres/<NNNN>/showtimes/... ; <NNNN> is the id.
  */
 import { THEATRES } from "../lib/theatres";
 
@@ -18,50 +28,60 @@ const HEADERS: Record<string, string> = {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 };
 
-interface AmcTheatre {
-  id?: number | string;
-  name?: string;
-  slug?: string;
+function mdyToday(): string {
+  const d = new Date();
+  return `${d.getMonth() + 1}-${d.getDate()}-${d.getFullYear()}`;
 }
 
-function norm(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-}
-
-async function searchByName(name: string): Promise<AmcTheatre[]> {
-  const url = `https://api.amctheatres.com/v2/theatres?name=${encodeURIComponent(name)}`;
-  const res = await fetch(url, { headers: HEADERS });
-  if (!res.ok) throw new Error(`name search HTTP ${res.status}`);
-  const data = (await res.json()) as { _embedded?: { theatres?: AmcTheatre[] } };
-  return data._embedded?.theatres ?? [];
-}
-
-async function fetchAllTheatres(): Promise<AmcTheatre[]> {
-  // Fallback: page through the full theatre list and match locally.
-  const all: AmcTheatre[] = [];
-  let url: string | undefined = "https://api.amctheatres.com/v2/theatres?page-size=100&page-number=1";
-  let guard = 0;
-  while (url && guard < 20) {
-    const res: Response = await fetch(url, { headers: HEADERS });
-    if (!res.ok) throw new Error(`list HTTP ${res.status}`);
+async function verifyId(id: string): Promise<void> {
+  // Showtimes endpoint is covered by the free tier; a 2xx (even with zero
+  // showtimes) confirms the id is real and authorized for your key.
+  const url = `https://api.amctheatres.com/v2/theatres/${id}/showtimes/${mdyToday()}`;
+  try {
+    const res = await fetch(url, { headers: HEADERS });
+    if (res.status === 401) {
+      console.log(`  ${id}: HTTP 401 — AMC_VENDOR_KEY missing/invalid.`);
+      return;
+    }
+    if (!res.ok) {
+      console.log(`  ${id}: HTTP ${res.status} — not a valid/authorized theatre id.`);
+      return;
+    }
     const data = (await res.json()) as {
-      _embedded?: { theatres?: AmcTheatre[] };
-      _links?: { next?: { href?: string } };
+      _embedded?: { showtimes?: Array<{ theatreName?: string }> };
+      theatreName?: string;
     };
-    all.push(...(data._embedded?.theatres ?? []));
-    url = data._links?.next?.href;
-    guard += 1;
+    const name =
+      data.theatreName ?? data._embedded?.showtimes?.[0]?.theatreName ?? "(name not in payload)";
+    console.log(`  ${id}: OK ✓  ${name}  — paste this id into lib/theatres.ts`);
+  } catch (err) {
+    console.log(`  ${id}: request failed — ${err instanceof Error ? err.message : err}`);
   }
-  return all;
 }
 
-function bestMatch(target: string, candidates: AmcTheatre[]): AmcTheatre | undefined {
-  const t = norm(target);
-  // exact-ish first: candidate name contained in target or vice versa
-  return (
-    candidates.find((c) => c.name && (norm(c.name) === t)) ||
-    candidates.find((c) => c.name && (t.includes(norm(c.name)) || norm(c.name).includes(t)))
-  );
+async function trySearch(name: string): Promise<void> {
+  const query = name.replace(/&.*/, "").trim();
+  const url = `https://api.amctheatres.com/v2/theatres?name=${encodeURIComponent(query)}`;
+  try {
+    const res = await fetch(url, { headers: HEADERS });
+    if (!res.ok) {
+      const body = (await res.text()).slice(0, 160).replace(/\s+/g, " ");
+      console.log(`  ${name}\n    search HTTP ${res.status} — ${body || "(no body)"}`);
+      return;
+    }
+    const data = (await res.json()) as {
+      _embedded?: { theatres?: Array<{ id?: number | string; name?: string; slug?: string }> };
+    };
+    const list = data._embedded?.theatres ?? [];
+    const hit = list.find((t) => (t.name ?? "").toLowerCase().includes(query.toLowerCase())) ?? list[0];
+    if (hit?.id !== undefined) {
+      console.log(`  ${name}\n    externalId: "${hit.id}",  // ${hit.slug ?? hit.name ?? ""}`);
+    } else {
+      console.log(`  ${name}\n    search returned no match.`);
+    }
+  } catch (err) {
+    console.log(`  ${name}\n    search failed — ${err instanceof Error ? err.message : err}`);
+  }
 }
 
 async function main() {
@@ -70,35 +90,29 @@ async function main() {
     process.exit(1);
   }
 
-  const amcTheatres = THEATRES.filter((t) => t.chain === "AMC");
-  let fallbackList: AmcTheatre[] | null = null;
-
-  console.log("\nPaste these into lib/theatres.ts, then run `npm run db:seed`:\n");
-  for (const t of amcTheatres) {
-    // Use a short, distinctive query (drop the " & IMAX" suffix and city noise).
-    const query = t.name.replace(/&.*/, "").trim();
-    let match: AmcTheatre | undefined;
-    try {
-      match = bestMatch(t.name, await searchByName(query));
-    } catch {
-      /* fall through to full-list scan */
-    }
-    if (!match) {
-      try {
-        fallbackList = fallbackList ?? (await fetchAllTheatres());
-        match = bestMatch(t.name, fallbackList);
-      } catch (err) {
-        console.error(`  ! ${t.name}: lookup failed —`, err instanceof Error ? err.message : err);
-        continue;
-      }
-    }
-    if (match?.id !== undefined) {
-      console.log(`  ${t.name}\n    externalId: "${match.id}",  // ${match.slug ?? "(matched by name)"}`);
-    } else {
-      console.log(`  ${t.name}\n    externalId: "???",  // no match — check name manually`);
-    }
+  const ids = process.argv.slice(2).filter((a) => /^\d+$/.test(a));
+  if (ids.length > 0) {
+    console.log("\nVerifying candidate AMC theatre ids against the Showtimes API:\n");
+    for (const id of ids) await verifyId(id);
+    console.log("");
+    return;
   }
-  console.log("");
+
+  console.log("\nAttempting AMC theatre name search (often 403 on the free Showtimes tier):\n");
+  for (const t of THEATRES.filter((t) => t.chain === "AMC")) await trySearch(t.name);
+
+  console.log(
+    [
+      "",
+      "If the searches above were blocked (403), the catalog/search API isn't in your",
+      "key's grant. Get each id straight from your browser instead:",
+      "  1) Open the theatre's /showtimes page on amctheatres.com",
+      "  2) DevTools → Network → filter \"api.amctheatres\" → reload",
+      "  3) The request URL is  .../v2/theatres/<NNNN>/showtimes/...  — <NNNN> is the id",
+      "Then verify it here:  npm run resolve:amc -- <NNNN> <NNNN>",
+      "",
+    ].join("\n")
+  );
 }
 
 main().catch((err) => {

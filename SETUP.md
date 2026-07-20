@@ -37,12 +37,24 @@ Plus two secrets you generate yourself: `AUTH_SECRET`, `CRON_SECRET`.
 ## 3. AMC vendor key → `AMC_VENDOR_KEY` (covers Metreon + Universal CityWalk)
 1. https://developers.amctheatres.com → **Get Started / New Vendor Request**. Ask for **Showtime/Catalog** access (display of showtimes) — this tier is free. Approval can take a few days.
 2. When approved, copy the key → `AMC_VENDOR_KEY`.
-3. **Resolve the two AMC theatre IDs** (AMC hides these publicly). With the key set locally:
+3. **Resolve the two AMC theatre IDs.** AMC's "search/list theatres" catalog API is a
+   *separate grant* from the free Showtimes tier, so `npm run resolve:amc` may print
+   HTTP 403 — that's expected. The reliable way is your browser (the AMC site calls the
+   same API we do):
+   1. Open the theatre's showtimes page:
+      - Metreon → `https://www.amctheatres.com/movie-theatres/san-francisco/amc-metreon-16/showtimes`
+      - CityWalk → `https://www.amctheatres.com/movie-theatres/los-angeles/universal-cinema-amc-at-citywalk-hollywood/showtimes`
+   2. DevTools (F12) → **Network** tab → filter `api.amctheatres` → **reload**.
+   3. Any request URL reads `.../v2/theatres/`**`NNNN`**`/showtimes/...` — that **`NNNN`** is the id.
+
+   Confirm the number is right (uses your Showtimes key), then paste it in:
    ```bash
-   AMC_VENDOR_KEY=your_key npm run resolve:amc
+   AMC_VENDOR_KEY=your_key npm run resolve:amc -- NNNN NNNN   # verifies + prints theatre name
    ```
-   Paste the printed `externalId` values into `lib/theatres.ts` (replacing the two `AMC_*_TODO` placeholders), then re-run `npm run db:seed`.
+   Put each id in `lib/theatres.ts` (replacing the two `AMC_*_TODO` placeholders), then re-run `npm run db:seed`.
    - The 4 Regal theatre IDs are already filled in and verified.
+   - Optional: request the "Theatres" catalog API in the AMC portal and `npm run resolve:amc`
+     (no args) will look them up automatically.
 
 > Until the AMC key + IDs are in place, the 2 AMC theatres simply return no data;
 > the 4 Regal theatres work independently. Nothing crashes.
