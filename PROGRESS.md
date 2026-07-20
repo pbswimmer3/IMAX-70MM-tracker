@@ -17,7 +17,7 @@
 - [2026-07-20] SETUP.md + README: full account/deploy/cron walkthrough | onboarding | n/a
 - [2026-07-20] design/notifications.html: 4 notification design directions (artifact) | chosen: Footage Counter + Safelight | published
 ## Next Actions
-- [ ] Apply reviewer findings (review in flight)
+- [x] Applied reviewer findings: movies admin gate + matcher validation (ADMIN_EMAILS), email-cap race (record-intent-before-send in both passes), constant-time cron auth. Build passes. Dismiss-unsubscribes-whole-movie confirmed intended.
 - [ ] User: create accounts per SETUP.md, resolve AMC ids, deploy, wire cron
 - [ ] Verify Regal adapter against live response once deployed
 ## Last Session

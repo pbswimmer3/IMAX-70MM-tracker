@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { timingSafeEqual } from "crypto";
 import { prisma } from "@/lib/prisma";
 import { getAdapter } from "@/lib/adapters";
 import { matchesMovie } from "@/lib/match";
@@ -7,6 +8,13 @@ import { sign } from "@/lib/token";
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const DAYS_AHEAD = 14;
+
+function safeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
 
 function formatShowtimeLabel(startsAt: Date): string {
   return startsAt.toLocaleString("en-US", {
@@ -31,8 +39,8 @@ async function loadShowtimeLinks(movieId: string, theatreId: string): Promise<Sh
 
 export async function POST(req: NextRequest) {
   const authHeader = req.headers.get("authorization");
-  const expected = `Bearer ${process.env.CRON_SECRET ?? ""}`;
-  if (!process.env.CRON_SECRET || authHeader !== expected) {
+  const secret = process.env.CRON_SECRET;
+  if (!secret || !authHeader || !safeEqual(authHeader, `Bearer ${secret}`)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -159,8 +167,16 @@ export async function POST(req: NextRequest) {
         seenUserIds.add(user.id);
 
         try {
-          const reminder = await prisma.reminder.create({
-            data: { userId: user.id, dropEventId: dropEvent.id, sentCount: 0 },
+          // Record the send intent (sentCount=1) BEFORE sending. If the email
+          // then fails, this drop won't be re-sent, and the reminder pass will
+          // correctly treat it as awaiting reminder #2 (not a mislabeled #1).
+          await prisma.reminder.create({
+            data: {
+              userId: user.id,
+              dropEventId: dropEvent.id,
+              sentCount: 1,
+              lastSentAt: new Date(),
+            },
           });
 
           const dismissUrl = `${appUrl}/api/dismiss?token=${sign({
@@ -176,11 +192,6 @@ export async function POST(req: NextRequest) {
             showtimes: showtimeLinks,
             dismissUrl,
             bookingUrl: primaryBookingUrl,
-          });
-
-          await prisma.reminder.update({
-            where: { id: reminder.id },
-            data: { sentCount: 1, lastSentAt: new Date() },
           });
           remindersSent++;
         } catch (err) {
@@ -227,19 +238,22 @@ export async function POST(req: NextRequest) {
           dropEventId: reminder.dropEventId,
         })}`;
 
+        const nextCount = reminder.sentCount + 1;
+        // Consume the slot BEFORE sending so a send failure can never let the
+        // next run exceed the 3-email cap (we fail toward fewer emails).
+        await prisma.reminder.update({
+          where: { id: reminder.id },
+          data: { sentCount: nextCount, lastSentAt: new Date() },
+        });
+
         await sendReminderEmail({
           to: reminder.user.email,
           movieTitle: reminder.dropEvent.movie.title,
           theatreName: reminder.dropEvent.theatre.name,
-          reminderNumber: reminder.sentCount + 1,
+          reminderNumber: nextCount,
           showtimes: showtimeLinks,
           dismissUrl,
           bookingUrl: primaryBookingUrl,
-        });
-
-        await prisma.reminder.update({
-          where: { id: reminder.id },
-          data: { sentCount: reminder.sentCount + 1, lastSentAt: new Date() },
         });
         remindersSent++;
       } catch (err) {
