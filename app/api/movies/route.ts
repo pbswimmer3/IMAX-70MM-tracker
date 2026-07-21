@@ -49,6 +49,15 @@ export async function POST(req: NextRequest) {
     });
     return NextResponse.json({ movie });
   } catch (err) {
+    if (
+      err instanceof Prisma.PrismaClientKnownRequestError &&
+      err.code === "P2002"
+    ) {
+      return NextResponse.json(
+        { error: "That movie (slug) is already tracked." },
+        { status: 409 }
+      );
+    }
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to create movie" },
       { status: 400 }
