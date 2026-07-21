@@ -87,17 +87,23 @@ get showtimes until re-enabled. Consider an `enabled` flag on Theatre to label t
 "not yet monitored" so users aren't misled.
 
 ## Recent Changes
-- [2026-07-21] dashboard/page.tsx: added per-movie 70mm availability line ("on sale through <maxDate> · last found <firstSeenAt>"); groupBy query. tsc clean. (Change #2)
-- [2026-07-21] DIAGNOSED workflow: scrape.yml active on main, */15, but 0 scheduled runs fired (~2h live). Root causes: GitHub scheduler lag on <12h-old repo + earlier runs were dry-run push (never POSTed) + secrets APP_URL/CRON_SECRET unverified. See MORNING-QUESTIONS.md. (Change #1)
-- [2026-07-21] MORNING-QUESTIONS.md: handoff w/ Q's for Change #1 (trigger manual run? secrets set? relax cron?), #2 (semantics/placement), #3 Regal-via-home-PC + heartbeat email (OS? full-scraper-vs-proxy? alert policy?). parseRegal.ts still UNVERIFIED.
+- [2026-07-21] dashboard/page.tsx: added per-movie 70mm availability line ("on sale through <maxDate> · last found <firstSeenAt>"); groupBy query. tsc clean. (Change #2) — BUILT
+- [2026-07-21] Change #1 DIAGNOSED via live run #8 + 6 reverted dry-run probes (all diagnostics reverted; scraper clean):
+    * Secrets/pipeline CONFIRMED WORKING: ingest returned {theatresIngested:2, errors:[]}. Not a secrets/scheduler problem.
+    * REAL cause of empty UI = TWO AMC scraper bugs: (1) scraper only loads default "today" view; runs fire overnight PT when AMC shows "No remaining showtimes today"; never iterates future dates. (2) AMC redesigned page: old RSC fields showtimeId/showDateTimeUtc GONE; showtimes now lazy/scroll-rendered in DOM.
+    * PROVEN reachable from datacenter: future date + scroll renders Odyssey w/ IMAX 70MM showtimes. AMC is NOT IP-blocked → stays on GitHub Actions. Only REGAL needs residential IP.
+    * NEW AMC DOM schema (for the fix): movie=<section id="{slug}-{movieId}">; showtime=<a href="/showtimes/{id}"><time datetime="UTC ISO">; 70mm flag from experience-group HEADING text (/70mm|IMAX 70MM/); per-showtime bookingUrl now = amctheatres.com/showtimes/{id}.
+    * FIX NOT SHIPPED (systemic + 70mm-detection-critical; needs user OK): rewrite scrapeAmc to iterate ?date=YYYY-MM-DD ~14d + scroll + DOM parse; rewrite parseAmc to DOM-based. Open detail: exact DOM container grouping times under each format heading (validate in 1-2 dry-runs).
+- [2026-07-21] MORNING-QUESTIONS.md rewritten with true diagnosis + Qs: Q1 build AMC parser rewrite? Q2 confirm AMC-on-Actions/Regal-on-PC? Q3 self-contained Regal scraper vs proxy? Q4 alert policy (45min, 2 causes, email pradbiswas@gmail.com). parseRegal.ts still UNVERIFIED (needs real payload from PC).
 - [2026-07-21] scrape.yml: flipped to live (removed temp push trigger; schedule */15; dispatch dry_run default false)
 - [2026-07-21] parseAmc.ts rewrite + scrape.ts: AMC RSC parser validated; detects Odyssey 70mm at both AMC theatres
 - [2026-07-21] scraper: Regal skipped (deferred); SETUP.md/README rewritten for scraper architecture
 - [2026-07-21] app: full pipeline (auth/DB/ingest/emails/reminders/dashboard) built, reviewed, builds
 
 ## Last Session
-- Status: ACTIVE — Change #2 built+committed; Changes #1 & #3 BLOCKED on user answers (MORNING-QUESTIONS.md)
-- Branch: claude/session-tnklc6 (pushed). Awaiting user: run trigger, secrets check, Regal PC/OS/alert decisions.
-- Verified: 2026-07-21 (tsc --noEmit clean after npm install + prisma generate). No live prod ingest observed yet (DB empty).
+- Status: ACTIVE — Change #2 built+committed. Change #1 diagnosed (fix spec ready, NOT shipped, awaiting Q1). Change #3 planned (awaiting Q2-Q4).
+- Branch: claude/session-tnklc6 (pushed, scraper clean). Live run #8 confirmed pipeline+secrets healthy.
+- Key facts for next session: AMC NOT blocked (stays on Actions); only Regal needs PC (Windows). AMC fix = date-iteration + scroll + DOM parser (schema in Recent Changes). parseRegal.ts unverified.
+- Verified: 2026-07-21 (tsc --noEmit clean after npm i + prisma generate; ingest 200 OK in CI). DB still empty (AMC parser yields 0 until rewritten).
 - Exit: clean
-- Rollback: pre-change HEAD = 25a11ca (main). Change #2 = single commit on claude/session-tnklc6.
+- Rollback: pre-change HEAD = 25a11ca (main). Change #2 = dashboard commit on claude/session-tnklc6.
