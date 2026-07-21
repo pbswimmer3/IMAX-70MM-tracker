@@ -120,10 +120,39 @@ async function scrapeAmc(
       const html = container ? (container as HTMLElement).innerHTML.slice(0, 900) : "";
       return { bodyLen, loading, linkCount: links.length, links: links.slice(0, 6), sample, html };
     });
-    console.log(`[amc-diag] afterScroll: bodyLen=${dom.bodyLen} loading=${dom.loading} links=${dom.linkCount}`);
-    console.log(`[amc-diag] links: ${JSON.stringify(dom.links)}`);
-    console.log(`[amc-diag] text: ${dom.sample.replace(/\s+/g, " ")}`);
-    console.log(`[amc-diag] html: ${dom.html.replace(/\s+/g, " ")}`);
+    console.log(`[amc-diag] afterScroll(today): bodyLen=${dom.bodyLen} loading=${dom.loading} links=${dom.linkCount}`);
+    // Today is empty at night. Load TOMORROW to capture a POPULATED card so we
+    // can write a correct DOM parser (times + format badges + booking links).
+    const tomorrow = `${bookingFallback}?date=tomorrow`;
+    await page.goto(tomorrow, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+    for (let y = 0; y < 8; y++) {
+      await page.evaluate((n) => window.scrollTo(0, n * window.innerHeight), y);
+      await page.waitForTimeout(700);
+    }
+    await page
+      .waitForFunction(() => !document.querySelector('[aria-label="Loading"]'), { timeout: 12000 })
+      .catch(() => {});
+    await page.waitForTimeout(1500);
+    const tm = await page.evaluate(() => {
+      const bodyLen = document.body?.innerText?.length ?? 0;
+      const loading = !!document.querySelector('[aria-label="Loading"]');
+      const container =
+        document.querySelector("#showtime-results") || document.body;
+      const text = (container as HTMLElement).innerText;
+      // Find the Odyssey block and dump the HTML around it to reveal structure.
+      const html = (container as HTMLElement).innerHTML;
+      const oIdx = html.search(/odyssey/i);
+      const block = oIdx >= 0 ? html.slice(oIdx - 200, oIdx + 1600) : html.slice(0, 1600);
+      const reserveLinks = Array.from(document.querySelectorAll("a[href]"))
+        .map((a) => (a as HTMLAnchorElement).getAttribute("href") || "")
+        .filter((h) => /reserve|showtimes\/|ticket|seat/i.test(h))
+        .slice(0, 8);
+      return { bodyLen, loading, textSlice: text.slice(0, 600), block, reserveLinks };
+    });
+    console.log(`[amc-diag] TOMORROW: bodyLen=${tm.bodyLen} loading=${tm.loading}`);
+    console.log(`[amc-diag] tm-text: ${tm.textSlice.replace(/\s+/g, " ")}`);
+    console.log(`[amc-diag] tm-reserveLinks: ${JSON.stringify(tm.reserveLinks)}`);
+    console.log(`[amc-diag] tm-block: ${tm.block.replace(/\s+/g, " ")}`);
   }
   return showtimes;
 }
