@@ -11,6 +11,7 @@ async function main() {
         name: theatre.name,
         city: theatre.city,
         priority: theatre.priority,
+        showtimesUrl: theatre.showtimesUrl,
       },
       create: {
         chain: theatre.chain,
@@ -18,6 +19,7 @@ async function main() {
         city: theatre.city,
         externalId: theatre.externalId,
         priority: theatre.priority,
+        showtimesUrl: theatre.showtimesUrl,
       },
     });
   }
@@ -29,7 +31,7 @@ async function main() {
       active: true,
       matchers: {
         amc: {
-          movieIds: ["80679"],
+          movieIds: ["76238", "80679"],
           attributeCodes: ["IMAX70MM", "70MM", "IMAXWITH70MM"],
           titlePattern: "odyssey",
         },
@@ -45,7 +47,7 @@ async function main() {
       active: true,
       matchers: {
         amc: {
-          movieIds: ["80679"],
+          movieIds: ["76238", "80679"],
           attributeCodes: ["IMAX70MM", "70MM", "IMAXWITH70MM"],
           titlePattern: "odyssey",
         },
