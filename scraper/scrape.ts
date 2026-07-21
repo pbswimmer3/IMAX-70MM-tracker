@@ -65,7 +65,10 @@ function looksLikeCloudflareChallenge(title: string, bodyText: string): boolean 
   );
 }
 
-async function scrapeAmc(page: import("playwright").Page): Promise<NormalizedShowtimeLite[]> {
+async function scrapeAmc(
+  page: import("playwright").Page,
+  jsonResponses: string[]
+): Promise<NormalizedShowtimeLite[]> {
   // Let client-side content render (AMC hydrates after load).
   await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
   await page.waitForTimeout(1500);
@@ -74,30 +77,41 @@ async function scrapeAmc(page: import("playwright").Page): Promise<NormalizedSho
     const el = document.getElementById("__NEXT_DATA__");
     return el ? JSON.parse(el.textContent || "{}") : null;
   });
-
   if (nextData) return parseAmcNextData(nextData);
 
-  // Diagnostic: figure out where AMC actually keeps its showtime data.
-  const diag = await page.evaluate(() => {
-    const scripts = Array.from(document.querySelectorAll("script"));
-    const ld = scripts
-      .filter((s) => s.getAttribute("type") === "application/ld+json")
-      .map((s) => (s.textContent || "").slice(0, 500));
-    const text = document.body?.innerText ?? "";
-    return {
-      scriptCount: scripts.length,
-      ldCount: ld.length,
-      ldPreviews: ld,
-      hasNextF: scripts.some((s) => (s.textContent || "").includes("__next_f")),
-      hasApolloState: scripts.some((s) => (s.textContent || "").includes("__APOLLO_STATE__")),
-      scriptIds: scripts.map((s) => s.id).filter(Boolean),
-      bodyTextLen: text.length,
-      mentions70mm: (text.match(/70\s?mm/gi) || []).length,
-      hasShowtimeSelectors:
-        document.querySelectorAll('[class*="showtime" i], [data-testid*="showtime" i]').length,
-    };
-  });
-  console.log(`[amc-diag] ${JSON.stringify(diag).slice(0, 2600)}`);
+  // AMC is Next.js App Router: data is in the streaming RSC payload (__next_f).
+  // Pull the relevant script text and print windows around likely field names
+  // so we can shape the parser. Also list any internal JSON APIs the page hit.
+  const rsc = await page.evaluate(() =>
+    Array.from(document.querySelectorAll("script"))
+      .map((s) => s.textContent || "")
+      .filter((t) => t.includes("__next_f") || t.includes("70mm") || t.includes("showDateTime"))
+      .join("\n")
+  );
+  const markers = [
+    "showDateTimeUtc",
+    "showDateTimeLocal",
+    "showDateTime",
+    "premiumFormat",
+    "purchaseUrl",
+    "performances",
+    "70mm",
+    "attributes",
+    "movieName",
+    "utcDateTime",
+  ];
+  const windows: Record<string, string> = {};
+  for (const m of markers) {
+    const i = rsc.indexOf(m);
+    if (i >= 0) windows[m] = rsc.slice(Math.max(0, i - 120), i + 200);
+  }
+  const apiHits = jsonResponses
+    .filter((u) => /amctheatres|showtime|graphql|\/api\//i.test(u))
+    .filter((u) => !/newrelic|nr-data|segment|analytics|doubleclick|google/i.test(u))
+    .slice(0, 12);
+  console.log(`[amc-rsc] len=${rsc.length} markersFound=${Object.keys(windows).join(",")}`);
+  console.log(`[amc-api] ${apiHits.join(" || ") || "(no internal json api hits captured)"}`);
+  console.log(`[amc-rsc-windows] ${JSON.stringify(windows).slice(0, 3200)}`);
   return [];
 }
 
@@ -147,6 +161,16 @@ async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<
   });
   const page = await context.newPage();
 
+  const jsonResponses: string[] = [];
+  page.on("response", (r) => {
+    try {
+      const ct = r.headers()["content-type"] || "";
+      if (ct.includes("json")) jsonResponses.push(`${r.status()} ${r.url()}`);
+    } catch {
+      // ignore
+    }
+  });
+
   try {
     await page.goto(theatre.showtimesUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
     let title = await page.title();
@@ -177,7 +201,7 @@ async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<
 
     const showtimes =
       theatre.chain === "AMC"
-        ? await scrapeAmc(page)
+        ? await scrapeAmc(page, jsonResponses)
         : await scrapeRegal(page, theatre.externalId);
 
     console.log(
