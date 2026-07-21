@@ -11,6 +11,7 @@ async function main() {
         name: theatre.name,
         city: theatre.city,
         priority: theatre.priority,
+        showtimesUrl: theatre.showtimesUrl,
       },
       create: {
         chain: theatre.chain,
@@ -18,6 +19,7 @@ async function main() {
         city: theatre.city,
         externalId: theatre.externalId,
         priority: theatre.priority,
+        showtimesUrl: theatre.showtimesUrl,
       },
     });
   }

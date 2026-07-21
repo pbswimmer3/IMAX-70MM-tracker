@@ -67,6 +67,7 @@ model Theatre {
   externalId String
   city       String
   priority   Int
+  showtimesUrl String?
 
   showtimes  Showtime[]
   dropEvents DropEvent[]
