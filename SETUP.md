@@ -25,7 +25,7 @@ GitHub Actions (every 30 min, real Chromium)
 |---|---|---|---|
 | Database | Neon (or Vercel Postgres) | yes | `DATABASE_URL` |
 | Sign-in | Google Cloud OAuth | yes | `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET` |
-| Email | Resend | yes (3k/mo) | `RESEND_API_KEY`, `EMAIL_FROM` |
+| Email | Gmail SMTP | yes (~500/day) | `GMAIL_USER`, `GMAIL_APP_PASSWORD`, `EMAIL_FROM` |
 | Scraper | GitHub Actions | yes | runs the scraper on a schedule |
 | Hosting | Vercel Hobby | yes | your URL → `APP_URL` / `AUTH_URL` |
 
@@ -48,11 +48,17 @@ Plus two secrets you generate: `AUTH_SECRET`, `CRON_SECRET`. (No AMC key needed.
      `https://YOUR-APP.vercel.app/api/auth/callback/google`
 4. Copy Client ID / Secret → `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET`.
 
-## 3. Email (Resend) → `RESEND_API_KEY`, `EMAIL_FROM`
-1. https://resend.com → **API Keys → Create** → `RESEND_API_KEY`.
-2. Start fast with the shared sender: `EMAIL_FROM="70mm Tracker <onboarding@resend.dev>"`.
-   For better deliverability later, verify your own domain and use `alerts@yourdomain.com`.
-3. **Phone push:** these are normal emails — install the Gmail/Apple Mail app and enable
+## 3. Email (Gmail SMTP) → `GMAIL_USER`, `GMAIL_APP_PASSWORD`, `EMAIL_FROM`
+No custom domain needed — send straight from your Gmail.
+1. Turn on **2-Step Verification** for your Google account (required for app passwords).
+2. https://myaccount.google.com/apppasswords → create an app password → copy the
+   16-char code → `GMAIL_APP_PASSWORD` (strip the spaces). This is **not** your login
+   password, and can be revoked anytime.
+3. `GMAIL_USER="you@gmail.com"` and `EMAIL_FROM="70mm Tracker <you@gmail.com>"` — Gmail
+   forces the sender to `GMAIL_USER`, so only the display name is customizable.
+4. Free Gmail allows ~500 recipients/day — plenty for friends. When traffic grows,
+   swap in Resend + a verified domain (only `lib/email.ts` changes).
+5. **Phone push:** these are normal emails — install the Gmail/Apple Mail app and enable
    notifications so a drop email lands as a lock-screen push.
 
 ## 4. Secrets you generate

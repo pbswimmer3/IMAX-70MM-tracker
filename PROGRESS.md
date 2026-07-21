@@ -1,7 +1,7 @@
 # PROJECT STATE
 ## Stack
 - Frontend: Next.js 14 (App Router, TS)
-- Backend/DB: Vercel serverless + Postgres (Neon) via Prisma; Auth.js v5 (Google); Resend email
+- Backend/DB: Vercel serverless + Postgres (Neon) via Prisma; Auth.js v5 (Google); Gmail SMTP email (nodemailer)
 - Ingestion: Playwright headless-browser scraper in `scraper/`, run by GitHub Actions (.github/workflows/scrape.yml), POSTs to /api/ingest
 - Infra: Vercel Hobby (deployed) + GitHub Actions (public repo = free unlimited minutes)
 
