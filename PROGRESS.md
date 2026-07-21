@@ -6,10 +6,11 @@
 ## Current
 - Objective: IMAX 70mm showtime-drop tracker (6 theatres, The Odyssey; extensible). Core app built + verified (npm run build passes).
 - Branch: claude/imax-70mm-tracker-klhyd0
-## Blockers
-- [ ] AMC numeric theatreIds unresolved (AMC hides them) — user runs `npm run resolve:amc` with vendor key, pastes into lib/theatres.ts. Regal IDs verified + filled.
-- [ ] Regal adapter JSON field names are best-effort guesses — verify against a live getShowtimes response.
-- [ ] Live-run verification pending real DB + API keys (SETUP.md).
+## Blockers (DATA SOURCE — both direct paths dead, awaiting user decision)
+- [!] AMC official API REJECTS the vendor key: HTTP 403 code 12005 "Unauthorized VendorKey" on /v2/movies. Vendor program effectively closed/broken (matches public reports). AMC adapter unusable as-is.
+- [!] Regal getShowtimes returns Cloudflare 403 challenge HTML even from a residential IP. Regal adapter unusable as-is.
+- [~] Both HTML /showtimes PAGES do load 200 in a real browser (server-rendered) → a headless-browser scrape is the leading free fallback. Pending user decision on approach (free GH-Actions scraper vs paid scraping API vs aggregator API).
+- App logic (auth, DB, dedup, drop detection, emails, reminders, dashboard) is built + builds; only ingestion is blocked.
 ## Recent Changes
 - [2026-07-20] full Next.js app: prisma schema+seed, adapters (amc/regal), poll/dismiss/subscriptions/movies routes, auth (Google), Footage Counter + Safelight emails, dashboard/movies pages | build passes | delegated to implementer
 - [2026-07-20] lib/theatres.ts + seed matchers: patched real Regal IDs (0347/1010/1484/1026), Odyssey AMC movieId 80679, Regal hoCodes ho00019076+ho00021807 | from ID research | n/a
