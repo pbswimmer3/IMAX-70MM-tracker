@@ -4,18 +4,18 @@ name: "Scrape showtimes"
 # this workflow file is merged there. Use workflow_dispatch to test the
 # scraper from a feature branch before merging.
 on:
-  # TEMPORARY: dry-run on every push to the dev branch, to validate the scraper
-  # in CI (Cloudflare + parsing) before merge. Remove this block before merging.
-  push:
-    branches: ["claude/imax-70mm-tracker-klhyd0"]
+  # Scheduled runs post live results to /api/ingest. NOTE: GitHub only runs
+  # scheduled workflows on the repository's DEFAULT branch, so this fires once
+  # this workflow is merged to main. Use the manual "Run workflow" button
+  # (workflow_dispatch) any time; leave dry_run unchecked for a live run.
   workflow_dispatch:
     inputs:
       dry_run:
         description: "Dry run (log only, do not POST to /api/ingest)"
         type: boolean
-        default: true
+        default: false
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/15 * * * *"
 
 concurrency:
   group: scrape
@@ -38,4 +38,4 @@ jobs:
         run: cd scraper && npx playwright install --with-deps chromium
 
       - name: Run scraper
-        run: cd scraper && DRY_RUN=${{ github.event_name == 'schedule' && 'false' || github.event_name == 'push' && 'true' || inputs.dry_run }} APP_URL=${{ secrets.APP_URL }} CRON_SECRET=${{ secrets.CRON_SECRET }} npx tsx scrape.ts
+        run: cd scraper && DRY_RUN=${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }} APP_URL=${{ secrets.APP_URL }} CRON_SECRET=${{ secrets.CRON_SECRET }} npx tsx scrape.ts
