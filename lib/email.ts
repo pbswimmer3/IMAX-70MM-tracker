@@ -218,6 +218,57 @@ export async function sendDropEmail(params: DropEmailParams): Promise<void> {
   }
 }
 
+export type AlertKind = "offline" | "blocked" | "recovered";
+
+const ALERT_COPY: Record<AlertKind, { subject: string; heading: string; body: string }> = {
+  offline: {
+    subject: "⚠️ Regal feed down — gaming PC appears offline",
+    heading: "The Regal scraper stopped reporting",
+    body: "No data has arrived from the Regal scraper on your PC within the staleness window. The PC is likely powered off, asleep, or has lost its network connection. Turn it back on to resume Regal monitoring. (AMC keeps running on GitHub Actions and is unaffected.)",
+  },
+  blocked: {
+    subject: "⚠️ Regal is blocking the scraper (Cloudflare)",
+    heading: "Your PC is online, but Regal is blocking it",
+    body: "The Regal scraper on your PC is running and reporting in, but Regal returned a Cloudflare challenge instead of showtimes. This usually means Regal changed something or your home IP got flagged. The PC itself is fine — this needs a look at the Regal scraping side.",
+  },
+  recovered: {
+    subject: "✅ Regal feed recovered",
+    heading: "Regal monitoring is back to normal",
+    body: "The Regal scraper is reporting real showtime data again. No further action needed.",
+  },
+};
+
+// Dead-man's-switch / heartbeat alert for the out-of-band Regal scraper.
+export async function sendAlertEmail(params: {
+  to: string;
+  kind: AlertKind;
+  detail?: string;
+}): Promise<void> {
+  const { to, kind, detail } = params;
+  const copy = ALERT_COPY[kind];
+  const html = `<!doctype html><html><body style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#0b0b0d;color:#e7e7ea;padding:24px">
+    <div style="max-width:520px;margin:0 auto;background:#151519;border:1px solid #2a2a30;border-radius:12px;padding:24px">
+      <h2 style="margin:0 0 12px;font-size:18px">${copy.heading}</h2>
+      <p style="margin:0 0 12px;line-height:1.5;color:#c7c7cc">${copy.body}</p>
+      ${detail ? `<p style="margin:0;font-family:monospace;font-size:12px;color:#8a8a90">${detail}</p>` : ""}
+    </div>
+  </body></html>`;
+
+  if (!transporter) {
+    console.warn("[email] GMAIL_USER/GMAIL_APP_PASSWORD missing; skipping sendAlertEmail", {
+      to,
+      kind,
+    });
+    return;
+  }
+
+  try {
+    await transporter.sendMail({ from: FROM, to, subject: copy.subject, html });
+  } catch (err) {
+    console.warn("[email] sendAlertEmail failed:", err instanceof Error ? err.message : err);
+  }
+}
+
 export async function sendReminderEmail(params: ReminderEmailParams): Promise<void> {
   const { to, movieTitle, theatreName, reminderNumber } = params;
   const subject = `⏱ ${movieTitle} 70mm at ${theatreName} — reminder ${reminderNumber} of 3`;

@@ -12,6 +12,17 @@ const CRON_SECRET = process.env.CRON_SECRET ?? "";
 const DRY_RUN = ["true", "1", "yes"].includes((process.env.DRY_RUN ?? "").toLowerCase());
 // How many days ahead to scan AMC showtimes (one page load per date).
 const AMC_DATE_DAYS = 14;
+// Which chains this run scrapes. GitHub Actions runs "AMC" (datacenter IP is
+// fine for AMC); the home PC runs "REGAL" (needs a residential IP for Regal's
+// Cloudflare). Default AMC so the existing GitHub workflow is unchanged.
+const SCRAPE_CHAINS = new Set(
+  (process.env.SCRAPE_CHAINS ?? "AMC")
+    .split(",")
+    .map((c) => c.trim().toUpperCase())
+    .filter(Boolean)
+);
+// Heartbeat source label when this run scrapes Regal (drives offline alerts).
+const REGAL_SOURCE = "REGAL_PC";
 
 interface TheatreResult {
   theatre: ScrapeTheatre;
@@ -269,10 +280,11 @@ async function main() {
 
   try {
     for (const theatre of theatres) {
-      // Regal is deferred: Cloudflare's managed challenge blocks datacenter IPs
-      // (confirmed 0/4 in CI). Re-enable when a residential proxy is wired in.
-      if (theatre.chain === "REGAL") {
-        console.log(`[scrape] ${theatre.name}: deferred (Regal blocked on datacenter IPs)`);
+      // Only scrape chains this run is responsible for (see SCRAPE_CHAINS).
+      // Regal must run from a residential IP (home PC) — Cloudflare blocks
+      // datacenter IPs; AMC runs fine from GitHub Actions.
+      if (!SCRAPE_CHAINS.has(theatre.chain)) {
+        console.log(`[scrape] ${theatre.name}: skipped (${theatre.chain} not in SCRAPE_CHAINS)`);
         continue;
       }
       try {
@@ -323,6 +335,18 @@ async function main() {
     process.exit(allErrored ? 1 : 0);
   }
 
+  // If this run handled Regal (i.e. it's the home-PC scraper), attach a
+  // heartbeat so the app's watchdog knows the PC is alive and whether Regal is
+  // blocking us. blocked = every Regal theatre came back challenged/errored.
+  const regalResults = results.filter((r) => r.theatre.chain === "REGAL");
+  const sourceHealth =
+    SCRAPE_CHAINS.has("REGAL") && regalResults.length > 0
+      ? {
+          source: REGAL_SOURCE,
+          blocked: regalResults.every((r) => r.blocked || Boolean(r.error)),
+        }
+      : undefined;
+
   const body = {
     theatres: results.map((r) => ({
       externalId: r.theatre.externalId,
@@ -330,6 +354,7 @@ async function main() {
       showtimes: r.showtimes.filter((s) => s.is70mm),
     })),
     runReminders: true,
+    ...(sourceHealth ? { sourceHealth } : {}),
   };
 
   try {

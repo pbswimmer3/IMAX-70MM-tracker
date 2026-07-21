@@ -132,6 +132,20 @@ model DropEvent {
   @@unique([movieId, theatreId])
 }
 
+// Tracks the health of an out-of-band ingestion source (e.g. the Regal scraper
+// running on a home PC). Updated on every POST from that source; read by the
+// heartbeat watchdog to alert when data goes stale ("PC offline") or when the
+// source reports it is being blocked ("Regal Cloudflare-blocked").
+model SourceHealth {
+  id         String    @id @default(cuid())
+  source     String    @unique // e.g. "REGAL_PC"
+  lastPostAt DateTime  @default(now()) // last time the source posted anything
+  lastOkAt   DateTime? // last time it posted real (non-blocked) data
+  blocked    Boolean   @default(false) // last post: source reported blocked?
+  alertState String    @default("ok") // "ok" | "offline" | "blocked" (for one-alert-per-outage dedupe)
+  updatedAt  DateTime  @updatedAt
+}
+
 model Reminder {
   id          String    @id @default(cuid())
   userId      String

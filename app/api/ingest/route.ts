@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
 import { ingestAndDetect, sendDropEmails, processReminderPass } from "@/lib/pipeline";
+import { recordHeartbeat } from "@/lib/heartbeat";
 import type { NormalizedShowtime } from "@/lib/adapters/types";
 
 function safeEqual(a: string, b: string): boolean {
@@ -29,6 +30,9 @@ interface RawTheatre {
 interface RawBody {
   runReminders?: unknown;
   theatres?: unknown;
+  // Optional heartbeat from an out-of-band source (e.g. the Regal-on-PC
+  // scraper): { source: "REGAL_PC", blocked: boolean }.
+  sourceHealth?: unknown;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -102,6 +106,16 @@ export async function POST(req: NextRequest) {
 
   const runReminders = body.runReminders !== false;
 
+  // Record a heartbeat if the source included one (e.g. the Regal-on-PC scraper).
+  let heartbeatRecorded = false;
+  if (isObject(body.sourceHealth)) {
+    const sh = body.sourceHealth as Record<string, unknown>;
+    if (typeof sh.source === "string" && sh.source.length > 0) {
+      await recordHeartbeat(sh.source, sh.blocked === true);
+      heartbeatRecorded = true;
+    }
+  }
+
   const { showtimesUpserted, newDropEventIds, errors: ingestErrors } = await ingestAndDetect(
     normalized
   );
@@ -115,6 +129,7 @@ export async function POST(req: NextRequest) {
     showtimesUpserted,
     newDrops: newDropEventIds.length,
     remindersSent,
+    heartbeatRecorded,
     errors: [...ingestErrors, ...dropEmailErrors, ...reminderErrors],
   });
 }

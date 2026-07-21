@@ -38,4 +38,14 @@ jobs:
         run: cd scraper && npx playwright install --with-deps chromium
 
       - name: Run scraper
-        run: cd scraper && DRY_RUN=${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }} APP_URL=${{ secrets.APP_URL }} CRON_SECRET=${{ secrets.CRON_SECRET }} npx tsx scrape.ts
+        run: cd scraper && DRY_RUN=${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }} SCRAPE_CHAINS=AMC APP_URL=${{ secrets.APP_URL }} CRON_SECRET=${{ secrets.CRON_SECRET }} npx tsx scrape.ts
+
+      # Watchdog for the Regal-on-PC scraper. Runs even though this workflow
+      # only scrapes AMC: GitHub Actions stays up when the home PC is off, so it
+      # can detect the PC going offline and email one alert per outage.
+      - name: Regal heartbeat watchdog
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false) }}
+        run: |
+          curl -sS -X POST "${{ secrets.APP_URL }}/api/cron/heartbeat-check" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json" || echo "heartbeat-check call failed (non-fatal)"
