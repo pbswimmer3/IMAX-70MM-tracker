@@ -66,23 +66,39 @@ function looksLikeCloudflareChallenge(title: string, bodyText: string): boolean 
 }
 
 async function scrapeAmc(page: import("playwright").Page): Promise<NormalizedShowtimeLite[]> {
+  // Let client-side content render (AMC hydrates after load).
+  await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+  await page.waitForTimeout(1500);
+
   const nextData = await page.evaluate(() => {
     const el = document.getElementById("__NEXT_DATA__");
     return el ? JSON.parse(el.textContent || "{}") : null;
   });
 
-  if (!nextData) {
-    const bodyText = await page.evaluate(() => document.body?.innerText ?? "");
-    console.log(
-      `[scrape][amc] __NEXT_DATA__ not found; body length=${bodyText.length}, snippet="${bodyText.slice(
-        0,
-        300
-      )}"`
-    );
-    return [];
-  }
+  if (nextData) return parseAmcNextData(nextData);
 
-  return parseAmcNextData(nextData);
+  // Diagnostic: figure out where AMC actually keeps its showtime data.
+  const diag = await page.evaluate(() => {
+    const scripts = Array.from(document.querySelectorAll("script"));
+    const ld = scripts
+      .filter((s) => s.getAttribute("type") === "application/ld+json")
+      .map((s) => (s.textContent || "").slice(0, 500));
+    const text = document.body?.innerText ?? "";
+    return {
+      scriptCount: scripts.length,
+      ldCount: ld.length,
+      ldPreviews: ld,
+      hasNextF: scripts.some((s) => (s.textContent || "").includes("__next_f")),
+      hasApolloState: scripts.some((s) => (s.textContent || "").includes("__APOLLO_STATE__")),
+      scriptIds: scripts.map((s) => s.id).filter(Boolean),
+      bodyTextLen: text.length,
+      mentions70mm: (text.match(/70\s?mm/gi) || []).length,
+      hasShowtimeSelectors:
+        document.querySelectorAll('[class*="showtime" i], [data-testid*="showtime" i]').length,
+    };
+  });
+  console.log(`[amc-diag] ${JSON.stringify(diag).slice(0, 2600)}`);
+  return [];
 }
 
 async function scrapeRegal(
@@ -92,20 +108,28 @@ async function scrapeRegal(
   const dates = regalDateRange(14);
   const paths = dates.map((d) => regalGetShowtimesPath(externalId, d));
 
-  const payloads: unknown[] = await page.evaluate(async (paths: string[]) => {
-    const out: unknown[] = [];
-    for (const path of paths) {
-      try {
-        const r = await fetch(path, { headers: { accept: "application/json" } });
-        if (r.ok && (r.headers.get("content-type") || "").includes("json")) {
-          out.push(await r.json());
+  await page.waitForLoadState("domcontentloaded").catch(() => {});
+  let payloads: unknown[] = [];
+  try {
+    payloads = await page.evaluate(async (paths: string[]) => {
+      const out: unknown[] = [];
+      for (const path of paths) {
+        try {
+          const r = await fetch(path, { headers: { accept: "application/json" } });
+          if (r.ok && (r.headers.get("content-type") || "").includes("json")) {
+            out.push(await r.json());
+          }
+        } catch {
+          // ignore individual date failures
         }
-      } catch {
-        // ignore individual date failures
       }
-    }
-    return out;
-  }, paths);
+      return out;
+    }, paths);
+  } catch (err) {
+    console.log(
+      `[scrape][regal] in-page fetch failed: ${err instanceof Error ? err.message : err}`
+    );
+  }
 
   const nonEmpty = payloads.filter((p) => p !== null && p !== undefined);
   console.log(
@@ -130,17 +154,25 @@ async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<
     console.log(`[scrape][${theatre.chain}] ${theatre.name}: title="${title}"`);
 
     let blocked = looksLikeCloudflareChallenge(title, bodyText);
-    if (blocked) {
-      console.log(`[scrape][${theatre.chain}] ${theatre.name}: challenge detected, waiting up to 8s`);
-      await page.waitForTimeout(8000);
+    // Cloudflare managed challenge: poll for auto-clear, reloading between tries.
+    for (let attempt = 1; blocked && attempt <= 3; attempt++) {
+      console.log(
+        `[scrape][${theatre.chain}] ${theatre.name}: challenge (attempt ${attempt}/3), waiting`
+      );
+      await page.waitForTimeout(7000);
       title = await page.title();
       bodyText = await page.evaluate(() => document.body?.innerText ?? "");
       blocked = looksLikeCloudflareChallenge(title, bodyText);
-      if (blocked) {
-        console.log(`[scrape][${theatre.chain}] ${theatre.name}: still BLOCKED after wait`);
-      } else {
-        console.log(`[scrape][${theatre.chain}] ${theatre.name}: challenge cleared`);
+      if (blocked && attempt < 3) {
+        await page.reload({ waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
       }
+    }
+    console.log(
+      `[scrape][${theatre.chain}] ${theatre.name}: ${blocked ? "still BLOCKED" : "challenge cleared / not challenged"}`
+    );
+    // Skip the data fetch if still blocked (avoids context-destroyed noise).
+    if (blocked) {
+      return { theatre, showtimes: [], blocked };
     }
 
     const showtimes =
