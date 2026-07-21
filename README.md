@@ -22,7 +22,7 @@ SETUP.md to re-enable with a residential proxy).
 6. Regal Edwards Ontario Palace & IMAX — Ontario
 
 ## Stack
-Next.js 14 (App Router) · Prisma + Postgres · Auth.js (Google) · Resend email ·
+Next.js 14 (App Router) · Prisma + Postgres · Auth.js (Google) · Gmail SMTP email ·
 Vercel · Playwright scraper on GitHub Actions. All free-tier.
 
 ## Get started
@@ -48,8 +48,9 @@ is in [SETUP.md](./SETUP.md).
 | `AUTH_GOOGLE_ID` | yes | Google OAuth client ID (sign-in) |
 | `AUTH_GOOGLE_SECRET` | yes | Google OAuth client secret (sign-in) |
 | `AUTH_URL` | yes | Canonical URL Auth.js uses for OAuth callbacks |
-| `RESEND_API_KEY` | yes | Resend API key for sending emails |
-| `EMAIL_FROM` | yes | "From" address for outgoing emails (verified Resend sender/domain) |
+| `GMAIL_USER` | yes | Gmail address used as the SMTP sender |
+| `GMAIL_APP_PASSWORD` | yes | Google App Password (2-Step Verification required) for Gmail SMTP |
+| `EMAIL_FROM` | yes | "From" address for outgoing emails (Gmail forces the address to `GMAIL_USER`; display name is free) |
 | `CRON_SECRET` | yes | Shared secret authenticating `/api/cron/poll`, `/api/ingest`, and `/api/scrape-config`; also set as a GitHub Actions repo secret |
 | `APP_URL` | yes | Public base URL of the deployed app; used in email links and by the scraper to reach the API; also set as a GitHub Actions repo secret |
 | `AMC_VENDOR_KEY` | no | AMC official API vendor key (`X-AMC-Vendor-Key`); unused by the current headless-scraper pipeline, kept for the legacy/direct-API adapter |

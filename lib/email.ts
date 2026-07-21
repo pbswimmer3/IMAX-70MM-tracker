@@ -1,7 +1,26 @@
-import { Resend } from "resend";
+import nodemailer from "nodemailer";
 
-const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
-const FROM = process.env.EMAIL_FROM ?? "IMAX 70mm Tracker <alerts@example.com>";
+// Gmail SMTP: set GMAIL_USER to your address and GMAIL_APP_PASSWORD to a
+// 16-char Google App Password (Account -> Security -> 2-Step Verification ->
+// App passwords). Free Gmail allows ~500 recipients/day — plenty for now.
+const GMAIL_USER = process.env.GMAIL_USER;
+const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD;
+
+const transporter =
+  GMAIL_USER && GMAIL_APP_PASSWORD
+    ? nodemailer.createTransport({
+        host: "smtp.gmail.com",
+        port: 465,
+        secure: true,
+        auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD },
+      })
+    : null;
+
+// Gmail rewrites the envelope sender to the authenticated account, so the
+// address here must be GMAIL_USER; only the display name is free-form.
+const FROM =
+  process.env.EMAIL_FROM ??
+  (GMAIL_USER ? `IMAX 70mm Tracker <${GMAIL_USER}>` : "IMAX 70mm Tracker <alerts@example.com>");
 
 export interface ShowtimeLink {
   label: string;
@@ -187,13 +206,13 @@ export async function sendDropEmail(params: DropEmailParams): Promise<void> {
   const subject = `70mm print threaded — ${movieTitle} · ${theatreName}`;
   const html = buildDropEmailHtml(params);
 
-  if (!resend) {
-    console.warn("[email] RESEND_API_KEY missing; skipping sendDropEmail", { to, subject });
+  if (!transporter) {
+    console.warn("[email] GMAIL_USER/GMAIL_APP_PASSWORD missing; skipping sendDropEmail", { to, subject });
     return;
   }
 
   try {
-    await resend.emails.send({ from: FROM, to, subject, html });
+    await transporter.sendMail({ from: FROM, to, subject, html });
   } catch (err) {
     console.warn("[email] sendDropEmail failed:", err instanceof Error ? err.message : err);
   }
@@ -204,13 +223,13 @@ export async function sendReminderEmail(params: ReminderEmailParams): Promise<vo
   const subject = `⏱ ${movieTitle} 70mm at ${theatreName} — reminder ${reminderNumber} of 3`;
   const html = buildReminderEmailHtml(params);
 
-  if (!resend) {
-    console.warn("[email] RESEND_API_KEY missing; skipping sendReminderEmail", { to, subject });
+  if (!transporter) {
+    console.warn("[email] GMAIL_USER/GMAIL_APP_PASSWORD missing; skipping sendReminderEmail", { to, subject });
     return;
   }
 
   try {
-    await resend.emails.send({ from: FROM, to, subject, html });
+    await transporter.sendMail({ from: FROM, to, subject, html });
   } catch (err) {
     console.warn("[email] sendReminderEmail failed:", err instanceof Error ? err.message : err);
   }

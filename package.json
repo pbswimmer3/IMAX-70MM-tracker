@@ -17,13 +17,14 @@
     "@prisma/client": "5.19.1",
     "next": "14.2.35",
     "next-auth": "5.0.0-beta.19",
+    "nodemailer": "^6.9.15",
     "prisma": "5.19.1",
     "react": "18.3.1",
-    "react-dom": "18.3.1",
-    "resend": "^3.5.0"
+    "react-dom": "18.3.1"
   },
   "devDependencies": {
     "@types/node": "^20.14.15",
+    "@types/nodemailer": "^6.4.16",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "tsx": "^4.23.1",
