@@ -87,13 +87,17 @@ get showtimes until re-enabled. Consider an `enabled` flag on Theatre to label t
 "not yet monitored" so users aren't misled.
 
 ## Recent Changes
+- [2026-07-21] dashboard/page.tsx: added per-movie 70mm availability line ("on sale through <maxDate> · last found <firstSeenAt>"); groupBy query. tsc clean. (Change #2)
+- [2026-07-21] DIAGNOSED workflow: scrape.yml active on main, */15, but 0 scheduled runs fired (~2h live). Root causes: GitHub scheduler lag on <12h-old repo + earlier runs were dry-run push (never POSTed) + secrets APP_URL/CRON_SECRET unverified. See MORNING-QUESTIONS.md. (Change #1)
+- [2026-07-21] MORNING-QUESTIONS.md: handoff w/ Q's for Change #1 (trigger manual run? secrets set? relax cron?), #2 (semantics/placement), #3 Regal-via-home-PC + heartbeat email (OS? full-scraper-vs-proxy? alert policy?). parseRegal.ts still UNVERIFIED.
 - [2026-07-21] scrape.yml: flipped to live (removed temp push trigger; schedule */15; dispatch dry_run default false)
 - [2026-07-21] parseAmc.ts rewrite + scrape.ts: AMC RSC parser validated; detects Odyssey 70mm at both AMC theatres
 - [2026-07-21] scraper: Regal skipped (deferred); SETUP.md/README rewritten for scraper architecture
 - [2026-07-21] app: full pipeline (auth/DB/ingest/emails/reminders/dashboard) built, reviewed, builds
 
 ## Last Session
-- Status: ACTIVE (AMC live-ready; Regal deferred)
-- Verified: 2026-07-21 (AMC parser validated in CI dry-run; app build passes; not yet observed a live prod email)
+- Status: ACTIVE — Change #2 built+committed; Changes #1 & #3 BLOCKED on user answers (MORNING-QUESTIONS.md)
+- Branch: claude/session-tnklc6 (pushed). Awaiting user: run trigger, secrets check, Regal PC/OS/alert decisions.
+- Verified: 2026-07-21 (tsc --noEmit clean after npm install + prisma generate). No live prod ingest observed yet (DB empty).
 - Exit: clean
-- Rollback: last known-good = current HEAD on claude/imax-70mm-tracker-klhyd0
+- Rollback: pre-change HEAD = 25a11ca (main). Change #2 = single commit on claude/session-tnklc6.
