@@ -5,11 +5,13 @@ so you can grab tickets before they sell out. Built for The Odyssey (Christopher
 Nolan), extensible to any 70mm film.
 
 ## How it works
-A scheduler pings `/api/cron/poll` every ~10 min. For each tracked movie × theatre it
-fetches showtimes (AMC official API + Regal's JSON), detects newly released **IMAX
-70mm** screenings, and emails you — then sends hourly reminders (up to 3) until you
-click *"Don't need to track this movie."* Google sign-in; each user tracks their own
-movies.
+A GitHub Actions job runs a headless-browser scraper every ~30 min (both chains'
+direct APIs are blocked, so a real browser is used). It reads each AMC theatre's
+server-rendered showtimes, detects newly released **IMAX 70mm** screenings, and POSTs
+them to `/api/ingest`, which emails you — then sends hourly reminders (up to 3) until
+you click *"Don't need to track this movie."* Google sign-in; each user tracks their
+own movies. Regal's 4 theatres are deferred (Cloudflare blocks datacenter IPs; see
+SETUP.md to re-enable with a residential proxy).
 
 ## Watched theatres
 1. AMC Metreon 16 & IMAX — San Francisco
@@ -21,7 +23,7 @@ movies.
 
 ## Stack
 Next.js 14 (App Router) · Prisma + Postgres · Auth.js (Google) · Resend email ·
-Vercel + external cron. All free-tier.
+Vercel · Playwright scraper on GitHub Actions. All free-tier.
 
 ## Get started
 See **[SETUP.md](./SETUP.md)** for the full step-by-step (accounts, env vars, deploy,

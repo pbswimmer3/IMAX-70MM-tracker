@@ -31,7 +31,7 @@ async function main() {
       active: true,
       matchers: {
         amc: {
-          movieIds: ["80679"],
+          movieIds: ["76238", "80679"],
           attributeCodes: ["IMAX70MM", "70MM", "IMAXWITH70MM"],
           titlePattern: "odyssey",
         },
@@ -47,7 +47,7 @@ async function main() {
       active: true,
       matchers: {
         amc: {
-          movieIds: ["80679"],
+          movieIds: ["76238", "80679"],
           attributeCodes: ["IMAX70MM", "70MM", "IMAXWITH70MM"],
           titlePattern: "odyssey",
         },
