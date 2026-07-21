@@ -26,12 +26,21 @@ export default async function MoviesPage() {
 
       <div className="panel">
         <h2>Existing movies</h2>
-        {movies.map((movie) => (
-          <div key={movie.id} className="theatre-row">
-            <span>{movie.title}</span>
-            <span className="badge">{movie.active ? "active" : "inactive"}</span>
-          </div>
-        ))}
+        {movies.length === 0 ? (
+          <p className="search-hint" style={{ padding: 0 }}>
+            No movies tracked yet. Search for one above, or run{" "}
+            <code>npm run db:seed</code> to load the defaults.
+          </p>
+        ) : (
+          movies.map((movie) => (
+            <div key={movie.id} className="theatre-row">
+              <span>
+                {movie.title} <code style={{ color: "var(--muted)" }}>{movie.slug}</code>
+              </span>
+              <span className="badge">{movie.active ? "active" : "inactive"}</span>
+            </div>
+          ))
+        )}
       </div>
     </div>
   );

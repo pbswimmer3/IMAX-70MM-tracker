@@ -143,3 +143,50 @@ form.simple textarea {
   font-family: var(--font-mono);
   font-size: 13px;
 }
+
+.search-results {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 10;
+  background-color: var(--ground);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.search-result {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  padding: 8px 10px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--cream);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.search-result:last-child {
+  border-bottom: none;
+}
+
+.search-result:hover {
+  background-color: var(--panel);
+}
+
+.search-hint {
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.search-hint code {
+  font-family: var(--font-mono);
+  color: var(--cream);
+}

@@ -55,4 +55,5 @@ is in [SETUP.md](./SETUP.md).
 | `APP_URL` | yes | Public base URL of the deployed app; used in email links and by the scraper to reach the API; also set as a GitHub Actions repo secret |
 | `AMC_VENDOR_KEY` | no | AMC official API vendor key (`X-AMC-Vendor-Key`); unused by the current headless-scraper pipeline, kept for the legacy/direct-API adapter |
 | `ADMIN_EMAILS` | no | Comma-separated emails allowed to add movies at `/movies`; leave blank for single-user mode |
+| `TMDB_API_KEY` | no | [TMDB](https://www.themoviedb.org/settings/api) v3 API key powering the movie search bar at `/movies`; without it the search bar is disabled |
 | `DRY_RUN` | no | Set to `true`/`1`/`yes` when running `scraper/scrape.ts` locally to log findings without posting to `/api/ingest` |
