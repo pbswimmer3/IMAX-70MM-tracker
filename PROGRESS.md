@@ -6,11 +6,11 @@
 ## Current
 - Objective: IMAX 70mm showtime-drop tracker (6 theatres, The Odyssey; extensible). Core app built + verified (npm run build passes).
 - Branch: claude/imax-70mm-tracker-klhyd0
-## Blockers (DATA SOURCE — both direct paths dead, awaiting user decision)
-- [!] AMC official API REJECTS the vendor key: HTTP 403 code 12005 "Unauthorized VendorKey" on /v2/movies. Vendor program effectively closed/broken (matches public reports). AMC adapter unusable as-is.
-- [!] Regal getShowtimes returns Cloudflare 403 challenge HTML even from a residential IP. Regal adapter unusable as-is.
-- [~] Both HTML /showtimes PAGES do load 200 in a real browser (server-rendered) → a headless-browser scrape is the leading free fallback. Pending user decision on approach (free GH-Actions scraper vs paid scraping API vs aggregator API).
-- App logic (auth, DB, dedup, drop detection, emails, reminders, dashboard) is built + builds; only ingestion is blocked.
+## Blockers (DATA SOURCE — scraper validated in CI; split result)
+- [~] AMC: reachable from GitHub Actions (no Cloudflare block). Data is in Next.js App Router RSC payload (__next_f), not __NEXT_DATA__. Parser in progress (iter 3 dumps RSC field windows). Covers priority #1 Metreon + #3 CityWalk. VIABLE FREE.
+- [!] REGAL: hard Cloudflare "Attention Required" managed challenge on GH Actions datacenter IPs — 0/4 theatres cleared even with 3-attempt retry. CI-hosted free scraping NOT viable for Regal (#2 Hacienda, #4 Irvine, #5 LA Live, #6 Ontario). USER DECISION: ship AMC-only free, DEFER Regal (re-enable later with residential proxy). Scraper should skip REGAL for now; keep in config for easy re-enable.
+- Direct APIs remain dead (AMC vendor key 403; Regal getShowtimes CF-blocked even residential).
+- App logic (auth, DB, pipeline, emails, reminders, dashboard, /api/ingest) built + builds; ingestion path proven for AMC.
 ## Recent Changes
 - [2026-07-20] full Next.js app: prisma schema+seed, adapters (amc/regal), poll/dismiss/subscriptions/movies routes, auth (Google), Footage Counter + Safelight emails, dashboard/movies pages | build passes | delegated to implementer
 - [2026-07-20] lib/theatres.ts + seed matchers: patched real Regal IDs (0347/1010/1484/1026), Odyssey AMC movieId 80679, Regal hoCodes ho00019076+ho00021807 | from ID research | n/a
