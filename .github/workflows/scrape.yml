@@ -4,6 +4,10 @@ name: "Scrape showtimes"
 # this workflow file is merged there. Use workflow_dispatch to test the
 # scraper from a feature branch before merging.
 on:
+  # TEMPORARY: dry-run on every push to the dev branch, to validate the scraper
+  # in CI (Cloudflare + parsing) before merge. Remove this block before merging.
+  push:
+    branches: ["claude/imax-70mm-tracker-klhyd0"]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -34,4 +38,4 @@ jobs:
         run: cd scraper && npx playwright install --with-deps chromium
 
       - name: Run scraper
-        run: cd scraper && DRY_RUN=${{ github.event_name == 'schedule' && '' || inputs.dry_run }} APP_URL=${{ secrets.APP_URL }} CRON_SECRET=${{ secrets.CRON_SECRET }} npx tsx scrape.ts
+        run: cd scraper && DRY_RUN=${{ github.event_name == 'schedule' && 'false' || github.event_name == 'push' && 'true' || inputs.dry_run }} APP_URL=${{ secrets.APP_URL }} CRON_SECRET=${{ secrets.CRON_SECRET }} npx tsx scrape.ts

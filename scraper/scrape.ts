@@ -9,7 +9,7 @@ const CHROME_UA =
 
 const APP_URL = process.env.APP_URL ?? "";
 const CRON_SECRET = process.env.CRON_SECRET ?? "";
-const DRY_RUN = Boolean(process.env.DRY_RUN);
+const DRY_RUN = ["true", "1", "yes"].includes((process.env.DRY_RUN ?? "").toLowerCase());
 
 interface TheatreResult {
   theatre: ScrapeTheatre;
