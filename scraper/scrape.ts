@@ -96,36 +96,34 @@ async function scrapeAmc(
       .map((k) => `${k}=${stream.split(k).length - 1}`)
       .join(" ");
     console.log(`[amc-diag] tokens: ${counts}`);
-    // Showtimes now stream into a Suspense boundary via a client fetch. Capture
-    // the XHR/fetch responses the page makes so we can find the data source.
-    const seenUrls = new Set<string>();
-    const hits: string[] = [];
-    const onResp = (resp: import("playwright").Response) => {
-      const url = resp.url();
-      const ct = resp.headers()["content-type"] || "";
-      const interesting =
-        /json|graphql/i.test(ct) ||
-        /showtime|graphql|\/api\/|performance|movie/i.test(url);
-      if (interesting && !seenUrls.has(url)) {
-        seenUrls.add(url);
-        hits.push(`${resp.status()} ${ct.split(";")[0]} ${url}`);
-      }
-    };
-    page.on("response", onResp);
-    await page.reload({ waitUntil: "networkidle", timeout: 45000 }).catch(() => {});
-    await page.waitForTimeout(3000);
-    page.off("response", onResp);
-    console.log(`[amc-diag] captured ${hits.length} candidate responses:`);
-    for (const h of hits.slice(0, 25)) console.log(`[amc-diag]  ${h}`);
-    // Did showtimes render into the DOM after the client fetch?
+    // Hypothesis: the showtime list lazy-loads on scroll (IntersectionObserver)
+    // and never enters the viewport headless. Scroll through the page, wait for
+    // the loading skeleton to clear, then inspect the rendered DOM.
+    for (let y = 0; y < 8; y++) {
+      await page.evaluate((n) => window.scrollTo(0, n * window.innerHeight), y);
+      await page.waitForTimeout(800);
+    }
+    await page
+      .waitForFunction(() => !document.querySelector('[aria-label="Loading"]'), { timeout: 12000 })
+      .catch(() => {});
+    await page.waitForTimeout(1500);
     const dom = await page.evaluate(() => {
       const bodyLen = document.body?.innerText?.length ?? 0;
       const loading = !!document.querySelector('[aria-label="Loading"]');
-      const timeLinks = document.querySelectorAll('a[href*="/showtimes/"]').length;
-      const buyBtns = document.querySelectorAll('[href*="/showtimes/"]').length;
-      return { bodyLen, loading, timeLinks, buyBtns };
+      const links = Array.from(document.querySelectorAll("a[href]"))
+        .map((a) => (a as HTMLAnchorElement).getAttribute("href") || "")
+        .filter((h) => /showtime|\/movies\/|\/tickets|reserve|seat/i.test(h));
+      const container =
+        document.querySelector("#showtime-results") ||
+        document.querySelector('[aria-label="Filtered Showtime Results"]');
+      const sample = container ? (container as HTMLElement).innerText.slice(0, 700) : "(no container)";
+      const html = container ? (container as HTMLElement).innerHTML.slice(0, 900) : "";
+      return { bodyLen, loading, linkCount: links.length, links: links.slice(0, 6), sample, html };
     });
-    console.log(`[amc-diag] dom: ${JSON.stringify(dom)}`);
+    console.log(`[amc-diag] afterScroll: bodyLen=${dom.bodyLen} loading=${dom.loading} links=${dom.linkCount}`);
+    console.log(`[amc-diag] links: ${JSON.stringify(dom.links)}`);
+    console.log(`[amc-diag] text: ${dom.sample.replace(/\s+/g, " ")}`);
+    console.log(`[amc-diag] html: ${dom.html.replace(/\s+/g, " ")}`);
   }
   return showtimes;
 }
