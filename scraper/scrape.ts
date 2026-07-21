@@ -88,30 +88,30 @@ async function scrapeAmc(
       .filter((t) => t.includes("__next_f") || t.includes("70mm") || t.includes("showDateTime"))
       .join("\n")
   );
-  const markers = [
-    "showDateTimeUtc",
-    "showDateTimeLocal",
-    "showDateTime",
-    "premiumFormat",
-    "purchaseUrl",
-    "performances",
-    "70mm",
-    "attributes",
-    "movieName",
-    "utcDateTime",
-  ];
-  const windows: Record<string, string> = {};
-  for (const m of markers) {
-    const i = rsc.indexOf(m);
-    if (i >= 0) windows[m] = rsc.slice(Math.max(0, i - 120), i + 200);
+  void jsonResponses;
+  // Decode the __next_f JS-string payloads into the logical RSC stream.
+  const pushes = [...rsc.matchAll(/self\.__next_f\.push\(\[\d+,\s*("(?:[^"\\]|\\.)*")\s*\]\)/g)];
+  let stream = "";
+  for (const m of pushes) {
+    try {
+      stream += JSON.parse(m[1]);
+    } catch {
+      // ignore malformed chunk
+    }
   }
-  const apiHits = jsonResponses
-    .filter((u) => /amctheatres|showtime|graphql|\/api\//i.test(u))
-    .filter((u) => !/newrelic|nr-data|segment|analytics|doubleclick|google/i.test(u))
-    .slice(0, 12);
-  console.log(`[amc-rsc] len=${rsc.length} markersFound=${Object.keys(windows).join(",")}`);
-  console.log(`[amc-api] ${apiHits.join(" || ") || "(no internal json api hits captured)"}`);
-  console.log(`[amc-rsc-windows] ${JSON.stringify(windows).slice(0, 3200)}`);
+  if (!stream) stream = rsc;
+
+  const showtimeCount = (stream.match(/"showtimeId":/g) || []).length;
+  const slugs = [
+    ...new Set([...stream.matchAll(/aria-describedby\\?":\\?"([a-z0-9-]+-\d+)/g)].map((m) => m[1])),
+  ].slice(0, 12);
+  const fmtIdx = stream.search(/imax\s?70mm|IMAX 70MM|70mm/i);
+  const stIdx = stream.indexOf('"showtimeId"');
+  const beforeShowtime = stIdx >= 0 ? stream.slice(Math.max(0, stIdx - 1600), stIdx + 300) : "(none)";
+  const aroundFormat = fmtIdx >= 0 ? stream.slice(Math.max(0, fmtIdx - 400), fmtIdx + 400) : "(none)";
+  console.log(`[amc2] streamLen=${stream.length} showtimeCount=${showtimeCount} slugs=${slugs.join(",")}`);
+  console.log(`[amc2-before-showtime] ${beforeShowtime.replace(/\s+/g, " ").slice(0, 2000)}`);
+  console.log(`[amc2-around-format] ${aroundFormat.replace(/\s+/g, " ").slice(0, 1200)}`);
   return [];
 }
 
@@ -228,6 +228,12 @@ async function main() {
 
   try {
     for (const theatre of theatres) {
+      // Regal is deferred: Cloudflare's managed challenge blocks datacenter IPs
+      // (confirmed 0/4 in CI). Re-enable when a residential proxy is wired in.
+      if (theatre.chain === "REGAL") {
+        console.log(`[scrape] ${theatre.name}: deferred (Regal blocked on datacenter IPs)`);
+        continue;
+      }
       try {
         const result = await scrapeTheatre(browser, theatre);
         results.push(result);
