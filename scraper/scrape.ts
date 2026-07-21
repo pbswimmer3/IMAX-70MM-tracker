@@ -96,17 +96,36 @@ async function scrapeAmc(
       .map((k) => `${k}=${stream.split(k).length - 1}`)
       .join(" ");
     console.log(`[amc-diag] tokens: ${counts}`);
-    // Dump context around the data-bearing tokens to reveal the NEW schema
-    // (id field, datetime field, format flags) for a showtime record.
-    for (const tok of ["imax70mm", "aria-describedby", "performance"]) {
-      const i = stream.indexOf(tok);
-      if (i < 0) {
-        console.log(`[amc-diag] ${tok}: not found`);
-        continue;
+    // Showtimes now stream into a Suspense boundary via a client fetch. Capture
+    // the XHR/fetch responses the page makes so we can find the data source.
+    const seenUrls = new Set<string>();
+    const hits: string[] = [];
+    const onResp = (resp: import("playwright").Response) => {
+      const url = resp.url();
+      const ct = resp.headers()["content-type"] || "";
+      const interesting =
+        /json|graphql/i.test(ct) ||
+        /showtime|graphql|\/api\/|performance|movie/i.test(url);
+      if (interesting && !seenUrls.has(url)) {
+        seenUrls.add(url);
+        hits.push(`${resp.status()} ${ct.split(";")[0]} ${url}`);
       }
-      const slice = stream.slice(Math.max(0, i - 400), i + 400).replace(/\s+/g, " ");
-      console.log(`[amc-diag] @${tok}(${i}): ${slice}`);
-    }
+    };
+    page.on("response", onResp);
+    await page.reload({ waitUntil: "networkidle", timeout: 45000 }).catch(() => {});
+    await page.waitForTimeout(3000);
+    page.off("response", onResp);
+    console.log(`[amc-diag] captured ${hits.length} candidate responses:`);
+    for (const h of hits.slice(0, 25)) console.log(`[amc-diag]  ${h}`);
+    // Did showtimes render into the DOM after the client fetch?
+    const dom = await page.evaluate(() => {
+      const bodyLen = document.body?.innerText?.length ?? 0;
+      const loading = !!document.querySelector('[aria-label="Loading"]');
+      const timeLinks = document.querySelectorAll('a[href*="/showtimes/"]').length;
+      const buyBtns = document.querySelectorAll('[href*="/showtimes/"]').length;
+      return { bodyLen, loading, timeLinks, buyBtns };
+    });
+    console.log(`[amc-diag] dom: ${JSON.stringify(dom)}`);
   }
   return showtimes;
 }
