@@ -134,25 +134,22 @@ async function scrapeAmc(
       .catch(() => {});
     await page.waitForTimeout(1500);
     const tm = await page.evaluate(() => {
-      const bodyLen = document.body?.innerText?.length ?? 0;
-      const loading = !!document.querySelector('[aria-label="Loading"]');
-      const container =
-        document.querySelector("#showtime-results") || document.body;
-      const text = (container as HTMLElement).innerText;
-      // Find the Odyssey block and dump the HTML around it to reveal structure.
-      const html = (container as HTMLElement).innerHTML;
-      const oIdx = html.search(/odyssey/i);
-      const block = oIdx >= 0 ? html.slice(oIdx - 200, oIdx + 1600) : html.slice(0, 1600);
-      const reserveLinks = Array.from(document.querySelectorAll("a[href]"))
-        .map((a) => (a as HTMLAnchorElement).getAttribute("href") || "")
-        .filter((h) => /reserve|showtimes\/|ticket|seat/i.test(h))
-        .slice(0, 8);
-      return { bodyLen, loading, textSlice: text.slice(0, 600), block, reserveLinks };
+      const sec = document.querySelector('section[id="the-odyssey-76238"]') as HTMLElement | null;
+      if (!sec) return { found: false, text: "", anchors: [] as any[] };
+      const text = sec.innerText;
+      const anchors = Array.from(sec.querySelectorAll('a[href^="/showtimes/"]')).map((a) => {
+        const t = a.querySelector("time[datetime]");
+        return {
+          href: a.getAttribute("href"),
+          cls: a.className,
+          dt: t ? t.getAttribute("datetime") : null,
+        };
+      });
+      return { found: true, text, anchors };
     });
-    console.log(`[amc-diag] TOMORROW: bodyLen=${tm.bodyLen} loading=${tm.loading}`);
-    console.log(`[amc-diag] tm-text: ${tm.textSlice.replace(/\s+/g, " ")}`);
-    console.log(`[amc-diag] tm-reserveLinks: ${JSON.stringify(tm.reserveLinks)}`);
-    console.log(`[amc-diag] tm-block: ${tm.block.replace(/\s+/g, " ")}`);
+    console.log(`[amc-diag] odyssey found=${tm.found}`);
+    console.log(`[amc-diag] odyssey-text: ${tm.text.replace(/\s+/g, " ").slice(0, 800)}`);
+    console.log(`[amc-diag] odyssey-anchors: ${JSON.stringify(tm.anchors.slice(0, 10))}`);
   }
   return showtimes;
 }
