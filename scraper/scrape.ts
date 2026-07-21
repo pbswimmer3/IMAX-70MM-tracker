@@ -1,6 +1,6 @@
 import { chromium, type Browser } from "playwright";
 import { THEATRES, regalDateRange, regalGetShowtimesPath } from "./theatres";
-import { decodeNextFlight, parseAmcRsc } from "./parseAmc";
+import { normalizeAmcRecords, type RawAmcRecord } from "./parseAmc";
 import { parseRegalJson } from "./parseRegal";
 import type { NormalizedShowtimeLite, ScrapeTheatre } from "./types";
 
@@ -10,6 +10,19 @@ const CHROME_UA =
 const APP_URL = process.env.APP_URL ?? "";
 const CRON_SECRET = process.env.CRON_SECRET ?? "";
 const DRY_RUN = ["true", "1", "yes"].includes((process.env.DRY_RUN ?? "").toLowerCase());
+// How many days ahead to scan AMC showtimes (one page load per date).
+const AMC_DATE_DAYS = 14;
+// Which chains this run scrapes. GitHub Actions runs "AMC" (datacenter IP is
+// fine for AMC); the home PC runs "REGAL" (needs a residential IP for Regal's
+// Cloudflare). Default AMC so the existing GitHub workflow is unchanged.
+const SCRAPE_CHAINS = new Set(
+  (process.env.SCRAPE_CHAINS ?? "AMC")
+    .split(",")
+    .map((c) => c.trim().toUpperCase())
+    .filter(Boolean)
+);
+// Heartbeat source label when this run scrapes Regal (drives offline alerts).
+const REGAL_SOURCE = "REGAL_PC";
 
 interface TheatreResult {
   theatre: ScrapeTheatre;
@@ -65,27 +78,103 @@ function looksLikeCloudflareChallenge(title: string, bodyText: string): boolean 
   );
 }
 
+// Runs in the browser: extract every showtime from AMC's rendered DOM. Each
+// movie is a <section aria-label="Showtimes for …">; showtimes are
+// <a href="/showtimes/{id}"><time datetime="…"></a> grouped under experience
+// headings shaped "FORMAT: ALL-CAPS TAGLINE" (e.g. "IMAX 70MM: EXTRAORDINARY
+// AWAITS"). We walk each section in document order, tracking the current format
+// heading, and attach it to the showtimes that follow. Self-contained (no outer
+// closure refs) so it serializes into page.evaluate.
+function extractAmcInPage(): RawAmcRecord[] {
+  // "FORMAT: TAGLINE" where the tagline is all-caps — this uppercase tagline
+  // requirement is what excludes time labels like "10:30pm" and attribute chips.
+  const HEAD_RE = /^([A-Za-z0-9][A-Za-z0-9 &'/.+-]{1,40}):\s+[A-Z0-9][A-Z0-9 ,'&./-]{3,}$/;
+  const out: RawAmcRecord[] = [];
+  const sections = document.querySelectorAll('section[aria-label^="Showtimes for"]');
+  sections.forEach((section) => {
+    const aria = section.getAttribute("aria-label") || "";
+    let movieTitle = (aria.match(/^Showtimes for (.+)$/) || [])[1]?.trim() || "";
+    let movieExternalId: string | undefined;
+    const movieLink = section.querySelector('a[href^="/movies/"]');
+    if (movieLink) {
+      if (!movieTitle) movieTitle = (movieLink.textContent || "").trim();
+      movieExternalId = ((movieLink.getAttribute("href") || "").match(/\/movies\/.+-(\d+)/) || [])[1];
+    }
+    if (!movieExternalId) {
+      movieExternalId = ((section.getAttribute("id") || "").match(/-(\d+)$/) || [])[1];
+    }
+
+    let currentFormat = "";
+    const walker = document.createTreeWalker(section, NodeFilter.SHOW_ELEMENT);
+    let node: Node | null = walker.currentNode;
+    while (node) {
+      const el = node as HTMLElement;
+      const txt = (el.textContent || "").trim();
+      const hm = txt.match(HEAD_RE);
+      if (hm) currentFormat = hm[1].trim();
+      if (el.tagName === "A") {
+        const sm = (el.getAttribute("href") || "").match(/^\/showtimes\/(\d+)/);
+        if (sm) {
+          const time = el.querySelector("time[datetime]");
+          const dt = time ? time.getAttribute("datetime") : null;
+          if (dt) {
+            out.push({
+              showtimeId: sm[1],
+              datetimeIso: dt,
+              movieExternalId,
+              movieTitle,
+              formatLabel: currentFormat,
+            });
+          }
+        }
+      }
+      node = walker.nextNode();
+    }
+  });
+  return out;
+}
+
 async function scrapeAmc(
   page: import("playwright").Page,
-  bookingFallback: string
+  baseUrl: string
 ): Promise<NormalizedShowtimeLite[]> {
-  // Let client-side content render (AMC hydrates after load).
-  await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
-  await page.waitForTimeout(1500);
+  // AMC's page defaults to "today" (empty at night) and lazy-renders showtimes
+  // on scroll. Iterate the next 14 dates via ?date=YYYY-MM-DD, scroll to trigger
+  // rendering, then extract from the DOM. Dedupe by showtimeId across dates.
+  const dates = regalDateRange(AMC_DATE_DAYS);
+  const raw: RawAmcRecord[] = [];
+  let datesWithShowtimes = 0;
 
-  // AMC is Next.js App Router: showtime data is in the streaming RSC payload
-  // (self.__next_f.push([...])). Grab those scripts, decode, and parse.
-  const rawNextF = await page.evaluate(() =>
-    Array.from(document.querySelectorAll("script"))
-      .map((s) => s.textContent || "")
-      .filter((t) => t.includes("__next_f"))
-      .join("\n")
-  );
-  const stream = decodeNextFlight(rawNextF);
-  const showtimes = parseAmcRsc(stream, bookingFallback);
-  if (showtimes.length === 0) {
-    console.log(`[scrape][amc] no showtimes parsed (streamLen=${stream.length}) — page shape may have changed`);
+  for (const ymd of dates) {
+    try {
+      await page.goto(`${baseUrl}?date=${ymd}`, {
+        waitUntil: "domcontentloaded",
+        timeout: 45000,
+      });
+      for (let y = 0; y < 6; y++) {
+        await page.evaluate((n) => window.scrollTo(0, n * window.innerHeight), y);
+        await page.waitForTimeout(500);
+      }
+      // Wait for at least one showtime link, but don't stall on empty dates.
+      await page
+        .waitForSelector('section[aria-label^="Showtimes for"] a[href^="/showtimes/"]', {
+          timeout: 6000,
+        })
+        .catch(() => {});
+      const recs = await page.evaluate(extractAmcInPage);
+      if (recs.length > 0) datesWithShowtimes++;
+      raw.push(...recs);
+    } catch (err) {
+      console.log(
+        `[scrape][amc] ${ymd} failed: ${err instanceof Error ? err.message : err}`
+      );
+    }
   }
+
+  const showtimes = normalizeAmcRecords(raw);
+  console.log(
+    `[scrape][amc] ${showtimes.length} showtimes over ${datesWithShowtimes}/${dates.length} dates with data`
+  );
   return showtimes;
 }
 
@@ -191,10 +280,11 @@ async function main() {
 
   try {
     for (const theatre of theatres) {
-      // Regal is deferred: Cloudflare's managed challenge blocks datacenter IPs
-      // (confirmed 0/4 in CI). Re-enable when a residential proxy is wired in.
-      if (theatre.chain === "REGAL") {
-        console.log(`[scrape] ${theatre.name}: deferred (Regal blocked on datacenter IPs)`);
+      // Only scrape chains this run is responsible for (see SCRAPE_CHAINS).
+      // Regal must run from a residential IP (home PC) — Cloudflare blocks
+      // datacenter IPs; AMC runs fine from GitHub Actions.
+      if (!SCRAPE_CHAINS.has(theatre.chain)) {
+        console.log(`[scrape] ${theatre.name}: skipped (${theatre.chain} not in SCRAPE_CHAINS)`);
         continue;
       }
       try {
@@ -245,6 +335,18 @@ async function main() {
     process.exit(allErrored ? 1 : 0);
   }
 
+  // If this run handled Regal (i.e. it's the home-PC scraper), attach a
+  // heartbeat so the app's watchdog knows the PC is alive and whether Regal is
+  // blocking us. blocked = every Regal theatre came back challenged/errored.
+  const regalResults = results.filter((r) => r.theatre.chain === "REGAL");
+  const sourceHealth =
+    SCRAPE_CHAINS.has("REGAL") && regalResults.length > 0
+      ? {
+          source: REGAL_SOURCE,
+          blocked: regalResults.every((r) => r.blocked || Boolean(r.error)),
+        }
+      : undefined;
+
   const body = {
     theatres: results.map((r) => ({
       externalId: r.theatre.externalId,
@@ -252,6 +354,7 @@ async function main() {
       showtimes: r.showtimes.filter((s) => s.is70mm),
     })),
     runReminders: true,
+    ...(sourceHealth ? { sourceHealth } : {}),
   };
 
   try {

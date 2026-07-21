@@ -12,7 +12,7 @@ export default async function DashboardPage() {
 
   const userId = session.user.id;
 
-  const [theatres, movies, subscriptions, showtimes] = await Promise.all([
+  const [theatres, movies, subscriptions, showtimes, latestByMovie] = await Promise.all([
     prisma.theatre.findMany({ orderBy: { priority: "asc" } }),
     prisma.movie.findMany({ where: { active: true }, orderBy: { title: "asc" } }),
     prisma.subscription.findMany({ where: { userId, active: true } }),
@@ -21,11 +21,29 @@ export default async function DashboardPage() {
       include: { movie: true, theatre: true },
       orderBy: { startsAt: "asc" },
     }),
+    // Furthest-out showtime currently on sale per movie (across all theatres,
+    // including past ones so the "on sale through" date reflects the full
+    // window the scraper last saw). _max.startsAt = last day tickets exist.
+    prisma.showtime.groupBy({
+      by: ["movieId"],
+      _max: { startsAt: true, firstSeenAt: true },
+    }),
   ]);
 
   const subscribedMovieIds = new Set(
     subscriptions.filter((s) => s.theatreId === null).map((s) => s.movieId)
   );
+
+  // movieId -> { through: last showtime date, seenAt: last time scraper found any }
+  const availabilityByMovie = new Map(
+    latestByMovie.map((row) => [
+      row.movieId,
+      { through: row._max.startsAt, seenAt: row._max.firstSeenAt },
+    ])
+  );
+
+  const dayFmt = (d: Date) =>
+    new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 
   const showtimesByTheatre = new Map<string, typeof showtimes>();
   for (const showtime of showtimes) {
@@ -42,15 +60,30 @@ export default async function DashboardPage() {
       <div className="panel">
         <h2>Movies</h2>
         <p>Toggle a movie to get emailed the moment 70mm shows drop at any of the six theatres.</p>
-        {movies.map((movie) => (
-          <div key={movie.id} className="theatre-row">
-            <span>{movie.title}</span>
-            <SubscriptionToggle
-              movieId={movie.id}
-              initialActive={subscribedMovieIds.has(movie.id)}
-            />
-          </div>
-        ))}
+        {movies.map((movie) => {
+          const avail = availabilityByMovie.get(movie.id);
+          return (
+            <div key={movie.id} className="theatre-row">
+              <span>
+                {movie.title}
+                {avail?.through ? (
+                  <span style={{ display: "block", color: "var(--dim)", fontSize: 12, marginTop: 2 }}>
+                    70mm on sale through {dayFmt(avail.through)}
+                    {avail.seenAt ? ` · last found ${dayFmt(avail.seenAt)}` : ""}
+                  </span>
+                ) : (
+                  <span style={{ display: "block", color: "var(--dim)", fontSize: 12, marginTop: 2 }}>
+                    No 70mm showtimes found yet
+                  </span>
+                )}
+              </span>
+              <SubscriptionToggle
+                movieId={movie.id}
+                initialActive={subscribedMovieIds.has(movie.id)}
+              />
+            </div>
+          );
+        })}
         <p style={{ marginTop: 16 }}>
           <Link href="/movies">+ Add another movie</Link>
         </p>

@@ -87,13 +87,24 @@ get showtimes until re-enabled. Consider an `enabled` flag on Theatre to label t
 "not yet monitored" so users aren't misled.
 
 ## Recent Changes
+- [2026-07-21] Change #3 BUILT: Regal-on-PC scraping + heartbeat alerts. scraper SCRAPE_CHAINS filter (AMC on Actions / REGAL on home PC; replaces hard Regal skip) + posts sourceHealth heartbeat. New SourceHealth model; lib/heartbeat.ts (recordHeartbeat + checkHeartbeats: 1 alert/outage + recovery, 45min stale); /api/ingest records heartbeat; /api/cron/heartbeat-check watchdog (called every run by AMC workflow); lib/email.ts sendAlertEmail (offline/blocked/recovered); scraper/REGAL-PC-SETUP.md (Windows Task Scheduler). Full next build + tsc PASS. NEEDS: `npx prisma db push` on Neon; Vercel ALERT_EMAIL/HEARTBEAT_STALE_MINUTES; PC setup. parseRegal.ts still UNVERIFIED (needs 1 real payload from PC).
+- [2026-07-21] Change #1 FIXED + VALIDATED: rewrote AMC scraper (parseAmc.ts DOM-based + scrapeAmc date-iteration/scroll). CI dry-run: Metreon 769 showtimes/52 70mm, CityWalk 1088/161 70mm over 14/14 dates; 70mm detection correct (Odyssey IMAX 70MM=true; RealD 3D/Laser/Standard=false). AMC NOT blocked; stays on Actions.
+- [2026-07-21] dashboard/page.tsx: added per-movie 70mm availability line ("on sale through <maxDate> · last found <firstSeenAt>"); groupBy query. tsc clean. (Change #2) — BUILT
+- [2026-07-21] Change #1 DIAGNOSED via live run #8 + 6 reverted dry-run probes (all diagnostics reverted; scraper clean):
+    * Secrets/pipeline CONFIRMED WORKING: ingest returned {theatresIngested:2, errors:[]}. Not a secrets/scheduler problem.
+    * REAL cause of empty UI = TWO AMC scraper bugs: (1) scraper only loads default "today" view; runs fire overnight PT when AMC shows "No remaining showtimes today"; never iterates future dates. (2) AMC redesigned page: old RSC fields showtimeId/showDateTimeUtc GONE; showtimes now lazy/scroll-rendered in DOM.
+    * PROVEN reachable from datacenter: future date + scroll renders Odyssey w/ IMAX 70MM showtimes. AMC is NOT IP-blocked → stays on GitHub Actions. Only REGAL needs residential IP.
+    * NEW AMC DOM schema (for the fix): movie=<section id="{slug}-{movieId}">; showtime=<a href="/showtimes/{id}"><time datetime="UTC ISO">; 70mm flag from experience-group HEADING text (/70mm|IMAX 70MM/); per-showtime bookingUrl now = amctheatres.com/showtimes/{id}.
+    * FIX NOT SHIPPED (systemic + 70mm-detection-critical; needs user OK): rewrite scrapeAmc to iterate ?date=YYYY-MM-DD ~14d + scroll + DOM parse; rewrite parseAmc to DOM-based. Open detail: exact DOM container grouping times under each format heading (validate in 1-2 dry-runs).
+- [2026-07-21] MORNING-QUESTIONS.md rewritten with true diagnosis + Qs: Q1 build AMC parser rewrite? Q2 confirm AMC-on-Actions/Regal-on-PC? Q3 self-contained Regal scraper vs proxy? Q4 alert policy (45min, 2 causes, email pradbiswas@gmail.com). parseRegal.ts still UNVERIFIED (needs real payload from PC).
 - [2026-07-21] scrape.yml: flipped to live (removed temp push trigger; schedule */15; dispatch dry_run default false)
 - [2026-07-21] parseAmc.ts rewrite + scrape.ts: AMC RSC parser validated; detects Odyssey 70mm at both AMC theatres
 - [2026-07-21] scraper: Regal skipped (deferred); SETUP.md/README rewritten for scraper architecture
 - [2026-07-21] app: full pipeline (auth/DB/ingest/emails/reminders/dashboard) built, reviewed, builds
 
 ## Last Session
-- Status: ACTIVE (AMC live-ready; Regal deferred)
-- Verified: 2026-07-21 (AMC parser validated in CI dry-run; app build passes; not yet observed a live prod email)
+- Status: ALL 3 CHANGES BUILT on claude/session-tnklc6. #1 (AMC parser) validated live in CI. #2 (dashboard) built. #3 (Regal-on-PC + alerts) built, tsc+build pass (can't runtime-test w/o PC+DB migration).
+- USER TODO to go live: (1) merge claude/session-tnklc6 → main (activates AMC fix on the */15 schedule + deploys new routes). (2) `npx prisma db push` for SourceHealth table. (3) Vercel envs ALERT_EMAIL=pradbiswas@gmail.com, HEARTBEAT_STALE_MINUTES=45. (4) Set up PC per scraper/REGAL-PC-SETUP.md (SCRAPE_CHAINS=REGAL). (5) Verify parseRegal.ts vs a real payload from the PC.
+- Verified: 2026-07-21 — AMC CI dry-run detects Odyssey 70mm at both theatres; `next build` + `tsc --noEmit` clean (app+scraper).
 - Exit: clean
-- Rollback: last known-good = current HEAD on claude/imax-70mm-tracker-klhyd0
+- Rollback: pre-change HEAD = 25a11ca (main). Changes are separate commits on claude/session-tnklc6.
