@@ -1,6 +1,6 @@
 import { chromium, type Browser } from "playwright";
 import { THEATRES, regalDateRange, regalGetShowtimesPath } from "./theatres";
-import { parseAmcNextData } from "./parseAmc";
+import { decodeNextFlight, parseAmcRsc } from "./parseAmc";
 import { parseRegalJson } from "./parseRegal";
 import type { NormalizedShowtimeLite, ScrapeTheatre } from "./types";
 
@@ -67,52 +67,26 @@ function looksLikeCloudflareChallenge(title: string, bodyText: string): boolean 
 
 async function scrapeAmc(
   page: import("playwright").Page,
-  jsonResponses: string[]
+  bookingFallback: string
 ): Promise<NormalizedShowtimeLite[]> {
   // Let client-side content render (AMC hydrates after load).
   await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
   await page.waitForTimeout(1500);
 
-  const nextData = await page.evaluate(() => {
-    const el = document.getElementById("__NEXT_DATA__");
-    return el ? JSON.parse(el.textContent || "{}") : null;
-  });
-  if (nextData) return parseAmcNextData(nextData);
-
-  // AMC is Next.js App Router: data is in the streaming RSC payload (__next_f).
-  // Pull the relevant script text and print windows around likely field names
-  // so we can shape the parser. Also list any internal JSON APIs the page hit.
-  const rsc = await page.evaluate(() =>
+  // AMC is Next.js App Router: showtime data is in the streaming RSC payload
+  // (self.__next_f.push([...])). Grab those scripts, decode, and parse.
+  const rawNextF = await page.evaluate(() =>
     Array.from(document.querySelectorAll("script"))
       .map((s) => s.textContent || "")
-      .filter((t) => t.includes("__next_f") || t.includes("70mm") || t.includes("showDateTime"))
+      .filter((t) => t.includes("__next_f"))
       .join("\n")
   );
-  void jsonResponses;
-  // Decode the __next_f JS-string payloads into the logical RSC stream.
-  const pushes = [...rsc.matchAll(/self\.__next_f\.push\(\[\d+,\s*("(?:[^"\\]|\\.)*")\s*\]\)/g)];
-  let stream = "";
-  for (const m of pushes) {
-    try {
-      stream += JSON.parse(m[1]);
-    } catch {
-      // ignore malformed chunk
-    }
+  const stream = decodeNextFlight(rawNextF);
+  const showtimes = parseAmcRsc(stream, bookingFallback);
+  if (showtimes.length === 0) {
+    console.log(`[scrape][amc] no showtimes parsed (streamLen=${stream.length}) — page shape may have changed`);
   }
-  if (!stream) stream = rsc;
-
-  const showtimeCount = (stream.match(/"showtimeId":/g) || []).length;
-  const slugs = [
-    ...new Set([...stream.matchAll(/aria-describedby\\?":\\?"([a-z0-9-]+-\d+)/g)].map((m) => m[1])),
-  ].slice(0, 12);
-  const fmtIdx = stream.search(/imax\s?70mm|IMAX 70MM|70mm/i);
-  const stIdx = stream.indexOf('"showtimeId"');
-  const beforeShowtime = stIdx >= 0 ? stream.slice(Math.max(0, stIdx - 1600), stIdx + 300) : "(none)";
-  const aroundFormat = fmtIdx >= 0 ? stream.slice(Math.max(0, fmtIdx - 400), fmtIdx + 400) : "(none)";
-  console.log(`[amc2] streamLen=${stream.length} showtimeCount=${showtimeCount} slugs=${slugs.join(",")}`);
-  console.log(`[amc2-before-showtime] ${beforeShowtime.replace(/\s+/g, " ").slice(0, 2000)}`);
-  console.log(`[amc2-around-format] ${aroundFormat.replace(/\s+/g, " ").slice(0, 1200)}`);
-  return [];
+  return showtimes;
 }
 
 async function scrapeRegal(
@@ -161,16 +135,6 @@ async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<
   });
   const page = await context.newPage();
 
-  const jsonResponses: string[] = [];
-  page.on("response", (r) => {
-    try {
-      const ct = r.headers()["content-type"] || "";
-      if (ct.includes("json")) jsonResponses.push(`${r.status()} ${r.url()}`);
-    } catch {
-      // ignore
-    }
-  });
-
   try {
     await page.goto(theatre.showtimesUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
     let title = await page.title();
@@ -201,13 +165,12 @@ async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<
 
     const showtimes =
       theatre.chain === "AMC"
-        ? await scrapeAmc(page, jsonResponses)
+        ? await scrapeAmc(page, theatre.showtimesUrl)
         : await scrapeRegal(page, theatre.externalId);
 
+    const count70 = showtimes.filter((s) => s.is70mm).length;
     console.log(
-      `[scrape][${theatre.chain}] ${theatre.name}: ${blocked ? "BLOCKED" : "PASS"} — ${
-        showtimes.length
-      } 70mm showtimes found`
+      `[scrape][${theatre.chain}] ${theatre.name}: PASS — ${showtimes.length} showtimes, ${count70} are 70mm`
     );
 
     return { theatre, showtimes, blocked };
@@ -259,11 +222,15 @@ async function main() {
     for (const result of results) {
       const { theatre, showtimes, blocked, error } = result;
       const status = error ? `ERROR (${error})` : blocked ? "BLOCKED" : "PASS";
+      const count70 = showtimes.filter((s) => s.is70mm).length;
       console.log(
-        `[dry-run] ${theatre.name}: ${showtimes.length} showtimes (${showtimes.length} are 70mm) — ${status}`
+        `[dry-run] ${theatre.name}: ${showtimes.length} showtimes (${count70} are 70mm) — ${status}`
       );
-      for (const s of showtimes.slice(0, 3)) {
-        console.log(`  sample: ${s.movieTitle} | ${s.startsAt} | ${s.format}`);
+      for (const s of showtimes.slice(0, 4)) {
+        console.log(`  sample: ${s.movieTitle} | ${s.startsAt} | ${s.format} | 70mm=${s.is70mm}`);
+      }
+      for (const s of showtimes.filter((s) => s.is70mm).slice(0, 4)) {
+        console.log(`  70MM: ${s.movieTitle} (${s.movieExternalId}) | ${s.startsAt}`);
       }
     }
 
@@ -282,7 +249,7 @@ async function main() {
     theatres: results.map((r) => ({
       externalId: r.theatre.externalId,
       chain: r.theatre.chain,
-      showtimes: r.showtimes,
+      showtimes: r.showtimes.filter((s) => s.is70mm),
     })),
     runReminders: true,
   };

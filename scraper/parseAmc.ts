@@ -1,150 +1,83 @@
 import type { NormalizedShowtimeLite } from "./types";
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
+/**
+ * AMC theatre showtimes pages are Next.js App Router: the showtime data is
+ * serialized into the streaming RSC payload (self.__next_f.push([...])), not a
+ * clean JSON blob. Each showtime renders as:
+ *
+ *   {"showtime":{"showtimeId":145182280,...,"showDateTimeUtc":"2026-07-21T04:00:00.000Z",
+ *     "display":{"time":"9:00","amPm":"pm"}},
+ *    "aria-describedby":"moana-72474 moana-72474-universal-cinema-an-amc-theatre-opencaption-reclinerseating-laseratamc-reservedseating-0"}
+ *
+ * The first aria-describedby token is `{slug}-{movieId}` (movie identity); the
+ * second token additionally encodes the format/attribute codes for that showtime
+ * group — a real IMAX-70mm screening contains `imax70mm` (or a bare `70mm`) there.
+ */
 
-function upperIncludes70mm(value: string | undefined | null): boolean {
-  if (!value) return false;
-  const upper = value.toUpperCase();
+const IS_70MM = /imax70mm|(?:^|[-\s])70mm(?:[-\s]|$)/i;
+
+function titleFromSlug(slug: string): string {
   return (
-    upper.includes("70MM") || upper.includes("70 MM") || upper.includes("IMAX 70")
+    slug
+      .replace(/-/g, " ")
+      .replace(/\b\w/g, (c) => c.toUpperCase())
+      .trim() || "Unknown"
   );
 }
 
-function firstDefined<T = unknown>(obj: Record<string, unknown>, keys: string[]): T | undefined {
-  for (const key of keys) {
-    if (obj[key] !== undefined && obj[key] !== null) return obj[key] as T;
-  }
-  return undefined;
-}
-
-// AMC's __NEXT_DATA__ shape is undocumented and can change across deploys, so
-// we recursively search for the first array of "showtime-like" objects
-// (heuristic: at least one entry that looks like it has a movie name and a
-// date/time field) rather than assuming one fixed path. We assumed the array
-// most likely lives under props.pageProps (Next.js convention) but this
-// walker will find it anywhere in the tree.
-const MOVIE_NAME_KEYS = ["movieName", "movieTitle", "name", "title"];
-const DATETIME_KEYS = [
-  "showDateTimeUtc",
-  "showDateTimeLocal",
-  "showtime",
-  "startDateTime",
-  "dateTime",
-  "showTime",
-];
-
-function looksLikeShowtime(value: unknown): value is Record<string, unknown> {
-  if (!isObject(value)) return false;
-  const hasMovieName = MOVIE_NAME_KEYS.some((k) => typeof value[k] === "string");
-  const hasDateTime = DATETIME_KEYS.some((k) => typeof value[k] === "string");
-  return hasMovieName && hasDateTime;
-}
-
-export function findShowtimesArray(obj: unknown, depth = 0): Record<string, unknown>[] | null {
-  if (depth > 12 || obj === null || obj === undefined) return null;
-
-  if (Array.isArray(obj)) {
-    if (obj.length > 0 && obj.every((entry) => looksLikeShowtime(entry))) {
-      return obj as Record<string, unknown>[];
-    }
-    for (const entry of obj) {
-      const found = findShowtimesArray(entry, depth + 1);
-      if (found) return found;
-    }
-    return null;
-  }
-
-  if (isObject(obj)) {
-    // Prefer conventional Next.js nesting first.
-    const pageProps = (obj as Record<string, unknown>).pageProps;
-    if (depth === 0 && isObject(pageProps)) {
-      const found = findShowtimesArray(pageProps, depth + 1);
-      if (found) return found;
-    }
-    for (const key of Object.keys(obj)) {
-      const found = findShowtimesArray((obj as Record<string, unknown>)[key], depth + 1);
-      if (found) return found;
-    }
-  }
-
-  return null;
-}
-
-function extractAttributeStrings(entry: Record<string, unknown>): string[] {
-  const out: string[] = [];
-  const embedded = entry._embedded;
-  const attrSources: unknown[] = [
-    entry.attributes,
-    isObject(embedded) ? (embedded as Record<string, unknown>).attributes : undefined,
+/**
+ * Decode the __next_f JS-string chunks (raw <script> text, already filtered to
+ * those containing __next_f) into a single logical RSC stream string.
+ */
+export function decodeNextFlight(rawScriptText: string): string {
+  const pushes = [
+    ...rawScriptText.matchAll(/self\.__next_f\.push\(\[\d+,\s*("(?:[^"\\]|\\.)*")\s*\]\)/g),
   ];
-  for (const source of attrSources) {
-    if (!Array.isArray(source)) continue;
-    for (const attr of source) {
-      if (typeof attr === "string") {
-        out.push(attr);
-      } else if (isObject(attr)) {
-        if (typeof attr.code === "string") out.push(attr.code);
-        if (typeof attr.name === "string") out.push(attr.name);
-      }
+  let stream = "";
+  for (const m of pushes) {
+    try {
+      stream += JSON.parse(m[1]);
+    } catch {
+      // skip malformed chunk
     }
   }
-  return out;
+  return stream || rawScriptText;
 }
 
-export function parseAmcNextData(json: unknown): NormalizedShowtimeLite[] {
-  const showtimesArray = findShowtimesArray(json);
-  if (!showtimesArray) return [];
+/**
+ * Parse showtimes out of the decoded AMC RSC stream. Returns ALL showtimes with
+ * is70mm correctly flagged; the caller decides what to keep/send.
+ */
+export function parseAmcRsc(stream: string, bookingFallback?: string): NormalizedShowtimeLite[] {
+  const out: NormalizedShowtimeLite[] = [];
+  const seen = new Set<string>();
+  const re =
+    /"showtimeId":(\d+)[\s\S]{0,600}?"showDateTimeUtc":"([^"]+)"[\s\S]{0,600}?"aria-describedby":"([^"]+?)"/g;
 
-  const results: NormalizedShowtimeLite[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(stream)) !== null) {
+    const [, id, utc, aria] = m;
+    if (seen.has(id)) continue;
+    seen.add(id);
 
-  for (const entry of showtimesArray) {
-    const id = firstDefined<string | number>(entry, ["id", "showtimeId", "sessionId"]);
-    const movieTitle =
-      firstDefined<string>(entry, MOVIE_NAME_KEYS) ?? "Unknown";
-    const movieExternalIdRaw = firstDefined<string | number>(entry, [
-      "movieId",
-      "filmId",
-    ]);
-    const rawDate = firstDefined<string>(entry, DATETIME_KEYS);
-    if (!rawDate) continue;
-    const startsAt = new Date(rawDate);
+    const startsAt = new Date(utc);
     if (Number.isNaN(startsAt.getTime())) continue;
 
-    const bookingUrl = firstDefined<string>(entry, [
-      "purchaseUrl",
-      "ticketUrl",
-      "bookingUrl",
-      "url",
-    ]);
-    const premiumFormat = firstDefined<string>(entry, ["premiumFormat", "format"]);
-    const attributeStrings = extractAttributeStrings(entry);
+    const firstTok = aria.split(/\s+/)[0] || "";
+    const mv = firstTok.match(/^(.+)-(\d+)$/);
+    const movieExternalId = mv ? mv[2] : undefined;
+    const slug = mv ? mv[1] : firstTok;
+    const is70mm = IS_70MM.test(aria);
 
-    const is70mm =
-      attributeStrings.some(upperIncludes70mm) || upperIncludes70mm(premiumFormat);
-
-    if (!is70mm) continue;
-
-    const formatLabel =
-      attributeStrings.length > 0 ? attributeStrings.join(", ") : premiumFormat || "70mm";
-
-    const externalId =
-      id !== undefined
-        ? String(id)
-        : `${movieTitle}-${startsAt.toISOString()}`;
-
-    results.push({
-      externalId,
+    out.push({
+      externalId: id,
       startsAt: startsAt.toISOString(),
-      movieTitle,
-      movieExternalId:
-        movieExternalIdRaw !== undefined ? String(movieExternalIdRaw) : undefined,
-      format: formatLabel,
-      is70mm: true,
-      bookingUrl,
+      movieTitle: titleFromSlug(slug),
+      movieExternalId,
+      format: is70mm ? "IMAX 70mm" : "Standard",
+      is70mm,
+      bookingUrl: bookingFallback,
     });
   }
-
-  return results;
+  return out;
 }
