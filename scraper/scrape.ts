@@ -96,14 +96,16 @@ async function scrapeAmc(
       .map((k) => `${k}=${stream.split(k).length - 1}`)
       .join(" ");
     console.log(`[amc-diag] tokens: ${counts}`);
-    const anchor = ["showDateTimeUtc", "showDateTime", "showtimeId", "showtime"]
-      .map((k) => stream.indexOf(k))
-      .find((i) => i >= 0);
-    if (anchor !== undefined && anchor >= 0) {
-      const slice = stream.slice(Math.max(0, anchor - 120), anchor + 480).replace(/\s+/g, " ");
-      console.log(`[amc-diag] context @${anchor}: ${slice}`);
-    } else {
-      console.log(`[amc-diag] head: ${stream.slice(0, 500).replace(/\s+/g, " ")}`);
+    // Dump context around the data-bearing tokens to reveal the NEW schema
+    // (id field, datetime field, format flags) for a showtime record.
+    for (const tok of ["imax70mm", "aria-describedby", "performance"]) {
+      const i = stream.indexOf(tok);
+      if (i < 0) {
+        console.log(`[amc-diag] ${tok}: not found`);
+        continue;
+      }
+      const slice = stream.slice(Math.max(0, i - 400), i + 400).replace(/\s+/g, " ");
+      console.log(`[amc-diag] @${tok}(${i}): ${slice}`);
     }
   }
   return showtimes;
