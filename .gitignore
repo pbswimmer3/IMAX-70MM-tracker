@@ -6,3 +6,6 @@ node_modules/
 .env*.local
 .vercel
 *.log
+
+# Transient planning artifact (see CLAUDE.md: delete after execution)
+plan.md
