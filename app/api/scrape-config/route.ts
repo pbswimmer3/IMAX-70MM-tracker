@@ -27,6 +27,7 @@ export async function GET(req: NextRequest) {
       name: t.name,
       city: t.city,
       showtimesUrl: t.showtimesUrl,
+      horizonDate: t.horizonDate ? t.horizonDate.toISOString().slice(0, 10) : null,
     })),
   });
 }

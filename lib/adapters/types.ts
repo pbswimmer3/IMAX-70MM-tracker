@@ -6,6 +6,7 @@ export interface NormalizedShowtime {
   format: string;
   is70mm: boolean;
   bookingUrl?: string;
+  showDate?: string;
 }
 
 export interface TheatreLike {

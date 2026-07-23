@@ -1,7 +1,8 @@
 import { chromium, type Browser } from "playwright";
-import { THEATRES, regalDateRange, regalGetShowtimesPath } from "./theatres";
+import { THEATRES, regalDateRange, regalGetShowtimesPath, todayYmd } from "./theatres";
 import { normalizeAmcRecords, type RawAmcRecord } from "./parseAmc";
 import { parseRegalJson } from "./parseRegal";
+import { probeHorizon } from "./probe";
 import type { NormalizedShowtimeLite, ScrapeTheatre } from "./types";
 
 const CHROME_UA =
@@ -10,8 +11,6 @@ const CHROME_UA =
 const APP_URL = process.env.APP_URL ?? "";
 const CRON_SECRET = process.env.CRON_SECRET ?? "";
 const DRY_RUN = ["true", "1", "yes"].includes((process.env.DRY_RUN ?? "").toLowerCase());
-// How many days ahead to scan AMC showtimes (one page load per date).
-const AMC_DATE_DAYS = 14;
 // Which chains this run scrapes. GitHub Actions runs "AMC" (datacenter IP is
 // fine for AMC); the home PC runs "REGAL" (needs a residential IP for Regal's
 // Cloudflare). Default AMC so the existing GitHub workflow is unchanged.
@@ -28,6 +27,7 @@ interface TheatreResult {
   theatre: ScrapeTheatre;
   showtimes: NormalizedShowtimeLite[];
   blocked: boolean;
+  observedHorizon: string | null;
   error?: string;
 }
 
@@ -54,6 +54,7 @@ async function fetchTheatreConfig(): Promise<ScrapeTheatre[]> {
         externalId: t.externalId,
         name: t.name,
         showtimesUrl: t.showtimesUrl,
+        horizonDate: t.horizonDate ?? null,
       }));
     if (mapped.length === 0) {
       console.warn("[scrape] scrape-config returned no usable theatres; using local fallback");
@@ -136,21 +137,25 @@ function extractAmcInPage(): RawAmcRecord[] {
 
 async function scrapeAmc(
   page: import("playwright").Page,
-  baseUrl: string
-): Promise<NormalizedShowtimeLite[]> {
+  baseUrl: string,
+  storedHorizon: string | null
+): Promise<{ showtimes: NormalizedShowtimeLite[]; observedHorizon: string | null }> {
   // AMC's page defaults to "today" (empty at night) and lazy-renders showtimes
-  // on scroll. Iterate the next 14 dates via ?date=YYYY-MM-DD, scroll to trigger
-  // rendering, then extract from the DOM. Dedupe by showtimeId across dates.
-  const dates = regalDateRange(AMC_DATE_DAYS);
-  const raw: RawAmcRecord[] = [];
-  let datesWithShowtimes = 0;
-
-  for (const ymd of dates) {
+  // on scroll. Probe forward from the (lookback-adjusted) stored booking horizon
+  // via ?date=YYYY-MM-DD, scroll to trigger rendering, then extract from the DOM,
+  // stopping shortly past the first empty day. Dedupe by showtimeId across dates.
+  const dateUrl = (ymd: string) =>
+    `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}date=${ymd}`;
+  const fetchDate = async (ymd: string): Promise<RawAmcRecord[]> => {
     try {
-      await page.goto(`${baseUrl}?date=${ymd}`, {
-        waitUntil: "domcontentloaded",
-        timeout: 45000,
-      });
+      // Retry the navigation once: a single transient goto failure returning []
+      // would look like a genuinely empty date and could prematurely truncate
+      // the horizon (which is written back to Theatre.horizonDate).
+      try {
+        await page.goto(dateUrl(ymd), { waitUntil: "domcontentloaded", timeout: 45000 });
+      } catch {
+        await page.goto(dateUrl(ymd), { waitUntil: "domcontentloaded", timeout: 45000 });
+      }
       for (let y = 0; y < 6; y++) {
         await page.evaluate((n) => window.scrollTo(0, n * window.innerHeight), y);
         await page.waitForTimeout(500);
@@ -161,21 +166,21 @@ async function scrapeAmc(
           timeout: 6000,
         })
         .catch(() => {});
-      const recs = await page.evaluate(extractAmcInPage);
-      if (recs.length > 0) datesWithShowtimes++;
-      raw.push(...recs);
+      return await page.evaluate(extractAmcInPage);
     } catch (err) {
       console.log(
         `[scrape][amc] ${ymd} failed: ${err instanceof Error ? err.message : err}`
       );
+      return [];
     }
-  }
+  };
 
-  const showtimes = normalizeAmcRecords(raw);
+  const result = await probeHorizon(fetchDate, { today: todayYmd(), storedHorizon });
+  const showtimes = normalizeAmcRecords(result.records);
   console.log(
-    `[scrape][amc] ${showtimes.length} showtimes over ${datesWithShowtimes}/${dates.length} dates with data`
+    `[scrape][amc] ${showtimes.length} showtimes over ${result.datesWithShowtimes}/${result.datesProbed.length} dates with data (horizon=${result.observedHorizon})`
   );
-  return showtimes;
+  return { showtimes, observedHorizon: result.observedHorizon };
 }
 
 async function scrapeRegal(
@@ -249,24 +254,29 @@ async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<
     );
     // Skip the data fetch if still blocked (avoids context-destroyed noise).
     if (blocked) {
-      return { theatre, showtimes: [], blocked };
+      return { theatre, showtimes: [], blocked, observedHorizon: null };
     }
 
-    const showtimes =
-      theatre.chain === "AMC"
-        ? await scrapeAmc(page, theatre.showtimesUrl)
-        : await scrapeRegal(page, theatre.externalId);
+    let showtimes: NormalizedShowtimeLite[];
+    let observedHorizon: string | null = null;
+    if (theatre.chain === "AMC") {
+      const result = await scrapeAmc(page, theatre.showtimesUrl, theatre.horizonDate ?? null);
+      showtimes = result.showtimes;
+      observedHorizon = result.observedHorizon;
+    } else {
+      showtimes = await scrapeRegal(page, theatre.externalId);
+    }
 
     const count70 = showtimes.filter((s) => s.is70mm).length;
     console.log(
       `[scrape][${theatre.chain}] ${theatre.name}: PASS — ${showtimes.length} showtimes, ${count70} are 70mm`
     );
 
-    return { theatre, showtimes, blocked };
+    return { theatre, showtimes, blocked, observedHorizon };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.log(`[scrape][${theatre.chain}] ${theatre.name}: ERROR — ${message}`);
-    return { theatre, showtimes: [], blocked: false, error: message };
+    return { theatre, showtimes: [], blocked: false, observedHorizon: null, error: message };
   } finally {
     await context.close();
   }
@@ -300,6 +310,7 @@ async function main() {
           theatre,
           showtimes: [],
           blocked: false,
+          observedHorizon: null,
           error: err instanceof Error ? err.message : String(err),
         });
       }
@@ -352,6 +363,7 @@ async function main() {
       externalId: r.theatre.externalId,
       chain: r.theatre.chain,
       showtimes: r.showtimes.filter((s) => s.is70mm),
+      observedHorizon: r.observedHorizon,
     })),
     runReminders: true,
     ...(sourceHealth ? { sourceHealth } : {}),

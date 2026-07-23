@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
-import { ingestAndDetect, sendDropEmails, processReminderPass } from "@/lib/pipeline";
+import { ingestAndDetect, sendDropDigest } from "@/lib/pipeline";
 import { recordHeartbeat } from "@/lib/heartbeat";
 import type { NormalizedShowtime } from "@/lib/adapters/types";
 
@@ -19,12 +19,14 @@ interface RawShowtime {
   format?: unknown;
   is70mm?: unknown;
   bookingUrl?: unknown;
+  showDate?: unknown;
 }
 
 interface RawTheatre {
   externalId?: unknown;
   chain?: unknown;
   showtimes?: unknown;
+  observedHorizon?: unknown;
 }
 
 interface RawBody {
@@ -45,7 +47,12 @@ function isObject(value: unknown): value is Record<string, unknown> {
 // malformed (missing chain/externalId).
 function normalizeTheatre(
   raw: RawTheatre
-): { externalId: string; chain: string; showtimes: NormalizedShowtime[] } | null {
+): {
+  externalId: string;
+  chain: string;
+  showtimes: NormalizedShowtime[];
+  observedHorizon: string | null;
+} | null {
   if (typeof raw.externalId !== "string" || typeof raw.chain !== "string") return null;
   const rawShowtimes = Array.isArray(raw.showtimes) ? (raw.showtimes as RawShowtime[]) : [];
 
@@ -69,10 +76,16 @@ function normalizeTheatre(
       format: s.format,
       is70mm: s.is70mm,
       bookingUrl: typeof s.bookingUrl === "string" ? s.bookingUrl : undefined,
+      showDate: typeof s.showDate === "string" ? s.showDate : undefined,
     });
   }
 
-  return { externalId: raw.externalId, chain: raw.chain, showtimes };
+  return {
+    externalId: raw.externalId,
+    chain: raw.chain,
+    showtimes,
+    observedHorizon: typeof raw.observedHorizon === "string" ? raw.observedHorizon : null,
+  };
 }
 
 export async function POST(req: NextRequest) {
@@ -104,8 +117,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const runReminders = body.runReminders !== false;
-
   // Record a heartbeat if the source included one (e.g. the Regal-on-PC scraper).
   let heartbeatRecorded = false;
   if (isObject(body.sourceHealth)) {
@@ -119,17 +130,14 @@ export async function POST(req: NextRequest) {
   const { showtimesUpserted, newDropEventIds, errors: ingestErrors } = await ingestAndDetect(
     normalized
   );
-  const { errors: dropEmailErrors } = await sendDropEmails(newDropEventIds);
-  const { remindersSent, errors: reminderErrors } = runReminders
-    ? await processReminderPass()
-    : { remindersSent: 0, errors: [] as string[] };
+  const { digestsSent, errors: digestErrors } = await sendDropDigest();
 
   return NextResponse.json({
     theatresIngested: normalized.length,
     showtimesUpserted,
     newDrops: newDropEventIds.length,
-    remindersSent,
+    digestsSent,
     heartbeatRecorded,
-    errors: [...ingestErrors, ...dropEmailErrors, ...reminderErrors],
+    errors: [...ingestErrors, ...digestErrors],
   });
 }

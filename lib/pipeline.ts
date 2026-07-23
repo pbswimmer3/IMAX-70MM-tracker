@@ -1,7 +1,9 @@
 import { prisma } from "@/lib/prisma";
 import { matchesMovie } from "@/lib/match";
-import { sendDropEmail, sendReminderEmail, type ShowtimeLink } from "@/lib/email";
+import { sendDropEmail, sendReminderEmail, sendDropDigestEmail, type ShowtimeLink } from "@/lib/email";
 import { sign } from "@/lib/token";
+import { utcDateKey, newDropDates } from "@/lib/dates";
+import { buildDigests, type DropRow, type SubRow } from "@/lib/digest";
 import type { NormalizedShowtime } from "@/lib/adapters/types";
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
@@ -10,6 +12,7 @@ export interface TheatreIngest {
   externalId: string;
   chain: string;
   showtimes: NormalizedShowtime[];
+  observedHorizon?: string | null;
 }
 
 export function formatShowtimeLabel(startsAt: Date): string {
@@ -47,9 +50,12 @@ export async function ingestAndDetect(
 
   const movies = await prisma.movie.findMany({ where: { active: true } });
 
-  // key: `${movieId}:${theatreId}` -> pair, for any movie that had >=1 matching
-  // showtime recorded across this ingest run.
-  const matchedPairs = new Map<string, { movieId: string; theatreId: string }>();
+  // key: `${movieId}:${theatreId}` -> pair + the distinct date-keys of its
+  // matched 70mm showtimes recorded across this ingest run.
+  const matchedPairs = new Map<
+    string,
+    { movieId: string; theatreId: string; dateKeys: Set<string> }
+  >();
 
   for (const input of inputs) {
     let theatre;
@@ -101,10 +107,15 @@ export async function ingestAndDetect(
             },
           });
           showtimesUpserted++;
-          matchedPairs.set(`${movie.id}:${theatre.id}`, {
-            movieId: movie.id,
-            theatreId: theatre.id,
-          });
+
+          const pairKey = `${movie.id}:${theatre.id}`;
+          let pair = matchedPairs.get(pairKey);
+          if (!pair) {
+            pair = { movieId: movie.id, theatreId: theatre.id, dateKeys: new Set<string>() };
+            matchedPairs.set(pairKey, pair);
+          }
+          const dateKey = showtime.showDate ?? utcDateKey(showtime.startsAt);
+          pair.dateKeys.add(dateKey);
         } catch (err) {
           errors.push(
             `showtime upsert failed (${theatre.name}, ${movie.title}): ${
@@ -114,22 +125,55 @@ export async function ingestAndDetect(
         }
       }
     }
+
+    if (typeof input.observedHorizon === "string" && input.observedHorizon) {
+      try {
+        await prisma.theatre.update({
+          where: { id: theatre.id },
+          data: { horizonDate: new Date(`${input.observedHorizon}T00:00:00Z`) },
+        });
+      } catch (err) {
+        errors.push(
+          `theatre horizon update failed (${theatre.name}): ${
+            err instanceof Error ? err.message : err
+          }`
+        );
+      }
+    }
   }
 
-  // Determine new DropEvents.
+  // Determine new per-date DropEvents.
   const newDropEventIds: string[] = [];
   for (const pair of matchedPairs.values()) {
     try {
-      const existing = await prisma.dropEvent.findUnique({
-        where: { movieId_theatreId: { movieId: pair.movieId, theatreId: pair.theatreId } },
+      const existing = await prisma.dropEvent.findMany({
+        where: { movieId: pair.movieId, theatreId: pair.theatreId },
       });
-      if (!existing) {
-        const created = await prisma.dropEvent.create({ data: pair });
-        newDropEventIds.push(created.id);
+      const existingKeys = new Set(existing.map((e) => utcDateKey(e.showDate)));
+      const fresh = newDropDates(existingKeys, Array.from(pair.dateKeys));
+
+      for (const dateKey of fresh) {
+        try {
+          const created = await prisma.dropEvent.create({
+            data: {
+              movieId: pair.movieId,
+              theatreId: pair.theatreId,
+              showDate: new Date(`${dateKey}T00:00:00Z`),
+              notifiedAt: null,
+            },
+          });
+          newDropEventIds.push(created.id);
+        } catch (err) {
+          errors.push(
+            `drop event create failed (${pair.movieId}/${pair.theatreId}/${dateKey}): ${
+              err instanceof Error ? err.message : err
+            }`
+          );
+        }
       }
     } catch (err) {
       errors.push(
-        `drop event check/create failed (${pair.movieId}/${pair.theatreId}): ${
+        `drop event check failed (${pair.movieId}/${pair.theatreId}): ${
           err instanceof Error ? err.message : err
         }`
       );
@@ -287,4 +331,90 @@ export async function processReminderPass(): Promise<{
   }
 
   return { remindersSent, errors };
+}
+
+// Sends one digest email per subscribed user covering every un-notified
+// DropEvent (new bookable date) that matches their subscriptions, then stamps
+// notifiedAt on all processed DropEvents so they're never re-sent.
+export async function sendDropDigest(): Promise<{ digestsSent: number; errors: string[] }> {
+  const errors: string[] = [];
+  let digestsSent = 0;
+
+  const pendingDrops = await prisma.dropEvent.findMany({
+    where: { notifiedAt: null },
+    include: { movie: true, theatre: true },
+  });
+
+  if (pendingDrops.length === 0) {
+    return { digestsSent: 0, errors };
+  }
+
+  const pendingIds = pendingDrops.map((d) => d.id);
+  const movieIds = Array.from(new Set(pendingDrops.map((d) => d.movieId)));
+
+  const subscriptions = await prisma.subscription.findMany({
+    where: { movieId: { in: movieIds }, active: true },
+    include: { user: true },
+  });
+
+  const subRows: SubRow[] = subscriptions
+    .filter((s) => Boolean(s.user.email))
+    .map((s) => ({
+      userId: s.userId,
+      email: s.user.email as string,
+      movieId: s.movieId,
+      theatreId: s.theatreId,
+    }));
+
+  const bookingUrlCache = new Map<string, string | undefined>();
+  const dropRows: DropRow[] = [];
+  for (const drop of pendingDrops) {
+    const cacheKey = `${drop.movieId}:${drop.theatreId}`;
+    let bookingUrl = bookingUrlCache.get(cacheKey);
+    if (bookingUrl === undefined) {
+      try {
+        const links = await loadShowtimeLinks(drop.movieId, drop.theatreId);
+        bookingUrl = links.find((l) => l.url)?.url;
+      } catch {
+        bookingUrl = undefined;
+      }
+      bookingUrlCache.set(cacheKey, bookingUrl);
+    }
+
+    dropRows.push({
+      movieId: drop.movieId,
+      theatreId: drop.theatreId,
+      showDate: drop.showDate,
+      movieTitle: drop.movie.title,
+      theatreName: drop.theatre.name,
+      city: drop.theatre.city,
+      bookingUrl,
+    });
+  }
+
+  const digests = buildDigests(dropRows, subRows);
+
+  for (const digest of digests) {
+    try {
+      await sendDropDigestEmail({ to: digest.email, items: digest.items });
+      digestsSent++;
+    } catch (err) {
+      errors.push(
+        `drop digest email failed (user ${digest.userId}): ${
+          err instanceof Error ? err.message : err
+        }`
+      );
+    }
+  }
+
+  try {
+    await prisma.dropEvent.updateMany({
+      where: { id: { in: pendingIds } },
+      data: { notifiedAt: new Date() },
+    });
+  } catch (err) {
+    errors.push(`drop digest notifiedAt stamp failed: ${err instanceof Error ? err.message : err}`);
+  }
+
+  return { digestsSent, errors };
 }

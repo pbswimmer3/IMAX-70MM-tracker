@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import type { DigestItem } from "@/lib/digest";
 
 // Gmail SMTP: set GMAIL_USER to your address and GMAIL_APP_PASSWORD to a
 // 16-char Google App Password (Account -> Security -> 2-Step Verification ->
@@ -199,6 +200,120 @@ export function buildReminderEmailHtml(params: Omit<ReminderEmailParams, "to">):
     </table>
   </body>
 </html>`;
+}
+
+export interface DropDigestEmailParams {
+  to: string;
+  items: DigestItem[];
+}
+
+function formatDigestDate(d: Date): string {
+  // showDate is stored at T00:00:00Z; format in UTC so the calendar day matches
+  // regardless of the server's local timezone (avoids an off-by-one).
+  return d.toLocaleDateString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+// Only emit hrefs for well-formed http(s) URLs so a malformed scraped value
+// can't break out of the href attribute or inject a javascript: scheme.
+function safeHttpUrl(url: string | undefined): string | undefined {
+  if (!url || !/^https?:\/\//i.test(url)) return undefined;
+  return escapeHtml(url);
+}
+
+function digestItemRows(items: DigestItem[]): string {
+  return items
+    .map(
+      (item) => `
+        <tr>
+          <td style="padding:14px 10px;border-bottom:1px solid #2A2822;">
+            <div style="font-family:Georgia,'Times New Roman',serif;font-size:17px;color:#ECE3CF;">
+              ${escapeHtml(item.movieTitle)}
+            </div>
+            <div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#B9AF95;margin:2px 0 6px 0;">
+              ${escapeHtml(item.theatreName)} &middot; ${escapeHtml(item.city)}
+            </div>
+            <div style="font-family:'Courier New',Courier,monospace;font-size:13px;color:#F0A63C;">
+              ${item.dates.map((d) => escapeHtml(formatDigestDate(d))).join(", ")}
+            </div>
+            ${(() => {
+              const href = safeHttpUrl(item.bookingUrl);
+              return href
+                ? `<div style="margin-top:8px;"><a href="${href}" style="color:#F0A63C;font-family:'Courier New',Courier,monospace;font-size:13px;text-decoration:none;">tickets &rarr;</a></div>`
+                : "";
+            })()}
+          </td>
+        </tr>`
+    )
+    .join("");
+}
+
+// "Footage Counter" digest variant — one email per run listing every newly
+// opened 70mm date across a user's subscriptions.
+export function buildDropDigestEmailHtml(params: Omit<DropDigestEmailParams, "to">): string {
+  const { items } = params;
+
+  return `
+<!DOCTYPE html>
+<html>
+  <body style="margin:0;padding:0;background-color:#0A0A0C;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#0A0A0C;padding:32px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background-color:#141317;border:1px solid #2A2822;border-radius:6px;overflow:hidden;">
+            <tr>
+              <td style="padding:0;background-color:#0A0A0C;border-bottom:2px dashed #3A382F;">
+                <div style="height:14px;background-image:repeating-linear-gradient(90deg,#F0A63C 0 6px,transparent 6px 14px);opacity:0.5;"></div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:28px 28px 8px 28px;">
+                <p style="margin:0 0 4px 0;font-family:'Courier New',Courier,monospace;font-size:12px;letter-spacing:2px;color:#F0A63C;text-transform:uppercase;">
+                  New prints threaded
+                </p>
+                <h1 style="margin:0;font-family:Georgia,'Times New Roman',serif;font-size:22px;color:#ECE3CF;">
+                  Today's 70mm drops
+                </h1>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:12px 28px 4px 28px;">
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                  ${digestItemRows(items)}
+                </table>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
+}
+
+export async function sendDropDigestEmail(params: DropDigestEmailParams): Promise<void> {
+  const { to, items } = params;
+  const subject =
+    items.length === 1
+      ? `70mm print threaded — ${items[0].movieTitle} · ${items[0].theatreName}`
+      : `${items.length} new 70mm drops`;
+  const html = buildDropDigestEmailHtml(params);
+
+  if (!transporter) {
+    console.warn("[email] GMAIL_USER/GMAIL_APP_PASSWORD missing; skipping sendDropDigestEmail", {
+      to,
+      subject,
+    });
+    return;
+  }
+
+  // Let send failures propagate so the caller (sendDropDigest) counts sends
+  // accurately and records the error, rather than silently reporting success.
+  await transporter.sendMail({ from: FROM, to, subject, html });
 }
 
 export async function sendDropEmail(params: DropEmailParams): Promise<void> {

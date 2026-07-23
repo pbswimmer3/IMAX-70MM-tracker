@@ -7,8 +7,28 @@
 
 ## Current
 - Objective: IMAX 70mm showtime-drop tracker. 2 AMC theatres LIVE; 4 Regal DEFERRED.
-- Branch: claude/imax-70mm-tracker-klhyd0 (PR #1). App deployed on Vercel by user.
-- Status: workflow flipped to LIVE (dry-run push trigger removed; schedule */15). Schedule activates once this branch is MERGED TO main (GitHub runs scheduled workflows only on the default branch). workflow_dispatch works after merge for manual/immediate runs.
+- Branch: claude/imax-70mm-tracker-redesign-2i2ocs (redesign). App deployed on Vercel by user.
+- Status: prior branch klhyd0 (PR #1) superseded by the horizon redesign below.
+
+## Redesign: booking-horizon tracker + per-date digest (this branch)
+- WHY: fixed 14-day AMC rescan = 14 page loads/theatre/run (flaky); one-shot DropEvent
+  (@@unique[movieId,theatreId]) fired once ever, didn't model "new day dropped".
+- Scraper (scraper/probe.ts probeHorizon): per theatre, start at max(today, storedHorizon-2),
+  walk forward one date at a time, stop 1 day past the first EMPTY (any-format) date (overshoot=1,
+  fills single-day gaps, resets streak on a later non-empty day); hard cap 60d. Common case 1-3
+  loads vs 14. observedHorizon POSTed back → Theatre.horizonDate; fed to next run via /api/scrape-config.
+- Detection (lib/pipeline.ts ingestAndDetect): per-date DropEvents. DropEvent now
+  @@unique[movieId,theatreId,showDate] + showDate + notifiedAt. showDate = scraper's queryDate
+  (AMC) / utcDateKey fallback (Regal). Creates a DropEvent per newly-seen 70mm date.
+- Notify (sendDropDigest): ONE digest email/user/run over drops with notifiedAt=null
+  (lib/digest.ts buildDigests), then stamps notifiedAt on all pending (idempotent, at-most-once).
+- DEAD-BUT-KEPT (intentional): sendDropEmails/processReminderPass + Reminder model + /api/dismiss
+  + /api/cron/poll are now inert (digest replaces the 3x hourly nudge). Left intact to avoid a
+  destructive migration; remove in a follow-up if the nudge/dismiss flow is truly unwanted.
+- KNOWN LIMITATION: Regal drops key showDate off UTC (no queryDate); Regal is IP-deferred so N/A now.
+- TESTS/CI: Vitest (test/, 19 tests) on pure modules probeHorizon/dates/digest/is70mmFormat.
+  .github/workflows/test.yml runs on pull_request + push: npm ci → prisma generate → tsc → vitest
+  → scraper typecheck. Root scripts: test, typecheck.
 
 ## Data-source history (why the current design)
 - AMC official API: REJECTS vendor keys (HTTP 403 "Unauthorized VendorKey"). Dead.

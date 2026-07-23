@@ -68,6 +68,7 @@ model Theatre {
   city       String
   priority   Int
   showtimesUrl String?
+  horizonDate  DateTime?
 
   showtimes  Showtime[]
   dropEvents DropEvent[]
@@ -120,16 +121,18 @@ model Showtime {
 }
 
 model DropEvent {
-  id         String   @id @default(cuid())
+  id         String    @id @default(cuid())
   movieId    String
   theatreId  String
-  detectedAt DateTime @default(now())
+  showDate   DateTime
+  detectedAt DateTime  @default(now())
+  notifiedAt DateTime?
 
   movie     Movie      @relation(fields: [movieId], references: [id], onDelete: Cascade)
   theatre   Theatre    @relation(fields: [theatreId], references: [id], onDelete: Cascade)
   reminders Reminder[]
 
-  @@unique([movieId, theatreId])
+  @@unique([movieId, theatreId, showDate])
 }
 
 // Tracks the health of an out-of-band ingestion source (e.g. the Regal scraper
