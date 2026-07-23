@@ -51,6 +51,25 @@ function formatYmd(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
+// Adds n (possibly negative) days to a YYYY-MM-DD string, UTC-safe.
+export function addDaysYmd(ymd: string, n: number): string {
+  const d = new Date(`${ymd}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  const year = d.getUTCFullYear();
+  const month = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+// Today as YYYY-MM-DD (UTC calendar date).
+export function todayYmd(): string {
+  const d = new Date();
+  const year = d.getUTCFullYear();
+  const month = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 // Builds the next N (default 14) YYYY-MM-DD dates starting today, used to
 // drive in-page Regal getShowtimes fetches (one call per date).
 export function regalDateRange(days = 14): string[] {

@@ -22,6 +22,7 @@ export interface RawAmcRecord {
   movieExternalId?: string;
   movieTitle: string;
   formatLabel: string; // experience-group heading text before the colon, e.g. "IMAX 70MM"
+  queryDate?: string; // YYYY-MM-DD date this record was fetched under (probeHorizon tags this)
 }
 
 const AMC_BASE = "https://www.amctheatres.com";
@@ -51,6 +52,7 @@ export function normalizeAmcRecords(records: RawAmcRecord[]): NormalizedShowtime
       format: r.formatLabel || (is70 ? "IMAX 70mm" : "Standard"),
       is70mm: is70,
       bookingUrl: `${AMC_BASE}/showtimes/${r.showtimeId}`,
+      showDate: r.queryDate,
     });
   }
   return out;
