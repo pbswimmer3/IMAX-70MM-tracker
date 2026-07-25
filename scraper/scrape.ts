@@ -3,6 +3,7 @@ import { THEATRES, regalDateRange, regalGetShowtimesPath, todayYmd } from "./the
 import { normalizeAmcRecords, type RawAmcRecord } from "./parseAmc";
 import { parseRegalJson } from "./parseRegal";
 import { probeHorizon } from "./probe";
+import { shouldFailRun } from "./shouldFailRun";
 import type { NormalizedShowtimeLite, ScrapeTheatre } from "./types";
 
 const CHROME_UA =
@@ -368,7 +369,9 @@ async function main() {
     runReminders: true,
     ...(sourceHealth ? { sourceHealth } : {}),
   };
+  const theatresPosted = body.theatres.length;
 
+  let ingestFailed = false;
   try {
     const res = await fetch(`${APP_URL}/api/ingest`, {
       method: "POST",
@@ -378,20 +381,60 @@ async function main() {
       },
       body: JSON.stringify(body),
     });
-    const json = await res.json();
-    console.log("[scrape] ingest response:", JSON.stringify(json));
+
+    if (!res.ok) {
+      const bodyText = await res.text().catch(() => "<no body>");
+      console.error(
+        `[scrape] ingest POST failed: status=${res.status}, body=${bodyText.slice(0, 2000)}`
+      );
+      ingestFailed = shouldFailRun({
+        postFailed: true,
+        errors: [],
+        theatresPosted,
+        dryRun: DRY_RUN,
+      });
+    } else {
+      const json = await res.json();
+      console.log("[scrape] ingest response:", JSON.stringify(json));
+
+      const theatresMatched =
+        typeof json?.theatresMatched === "number" ? json.theatresMatched : undefined;
+      const activeMovies =
+        typeof json?.activeMovies === "number" ? json.activeMovies : undefined;
+      const responseErrors: string[] = Array.isArray(json?.errors) ? json.errors : [];
+
+      if (
+        shouldFailRun({
+          postFailed: false,
+          errors: responseErrors,
+          activeMovies,
+          theatresPosted,
+          theatresMatched,
+          dryRun: DRY_RUN,
+        })
+      ) {
+        ingestFailed = true;
+        console.error(
+          `[scrape] FAILED: theatresPosted=${theatresPosted}, theatresMatched=${theatresMatched}, ` +
+            `activeMovies=${activeMovies}, errors=${JSON.stringify(responseErrors)}`
+        );
+      }
+    }
   } catch (err) {
     console.error(
       "[scrape] POST to /api/ingest failed:",
       err instanceof Error ? err.message : err
     );
-    const allErrored = results.every((r) => r.error);
-    process.exit(allErrored ? 1 : 0);
-    return;
+    ingestFailed = shouldFailRun({
+      postFailed: true,
+      errors: [],
+      theatresPosted,
+      dryRun: DRY_RUN,
+    });
   }
 
   const allErrored = results.every((r) => r.error);
-  process.exit(allErrored ? 1 : 0);
+  process.exit(allErrored || ingestFailed ? 1 : 0);
 }
 
 main().catch((err) => {

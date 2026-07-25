@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
 import { prisma } from "@/lib/prisma";
+import { ensureBootstrapped } from "@/lib/bootstrap";
+import { redactError } from "@/lib/redact";
 
 function safeEqual(a: string, b: string): boolean {
   const ab = Buffer.from(a);
@@ -17,9 +19,12 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const bootstrap = await ensureBootstrapped();
+
   const theatres = await prisma.theatre.findMany();
 
   return NextResponse.json({
+    bootstrap: { ...bootstrap, errors: bootstrap.errors.map(redactError) },
     theatres: theatres.map((t) => ({
       id: t.id,
       chain: t.chain,

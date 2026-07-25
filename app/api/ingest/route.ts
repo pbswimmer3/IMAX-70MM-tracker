@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
 import { ingestAndDetect, sendDropDigest } from "@/lib/pipeline";
 import { recordHeartbeat } from "@/lib/heartbeat";
+import { ensureBootstrapped } from "@/lib/bootstrap";
+import { redactError } from "@/lib/redact";
 import type { NormalizedShowtime } from "@/lib/adapters/types";
 
 function safeEqual(a: string, b: string): boolean {
@@ -95,6 +97,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const bootstrap = await ensureBootstrapped();
+
   let body: RawBody;
   try {
     body = await req.json();
@@ -127,17 +131,31 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const { showtimesUpserted, newDropEventIds, errors: ingestErrors } = await ingestAndDetect(
-    normalized
-  );
+  const {
+    showtimesUpserted,
+    newDropEventIds,
+    errors: ingestErrors,
+    theatresMatched,
+    theatresSkipped,
+    activeMovies,
+  } = await ingestAndDetect(normalized);
   const { digestsSent, errors: digestErrors } = await sendDropDigest();
 
+  const redactedBootstrapErrors = bootstrap.errors.map(redactError);
+
   return NextResponse.json({
-    theatresIngested: normalized.length,
+    bootstrap: { ...bootstrap, errors: redactedBootstrapErrors },
+    theatresMatched,
+    theatresSkipped,
+    activeMovies,
     showtimesUpserted,
     newDrops: newDropEventIds.length,
     digestsSent,
     heartbeatRecorded,
-    errors: [...ingestErrors, ...digestErrors],
+    // Pipeline errors only — these are what the scraper's failure detection
+    // gates on. Email-send failures (digestErrors) go in notifyErrors so a
+    // single bouncing subscriber address doesn't red the scrape run.
+    errors: [...redactedBootstrapErrors, ...ingestErrors.map(redactError)],
+    notifyErrors: digestErrors.map(redactError),
   });
 }

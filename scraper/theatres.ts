@@ -6,7 +6,7 @@ import type { ScrapeTheatre } from "./types";
 export const THEATRES: ScrapeTheatre[] = [
   {
     chain: "AMC",
-    externalId: "AMC_METREON_TODO",
+    externalId: "amc-metreon-16",
     name: "AMC Metreon 16 & IMAX",
     showtimesUrl:
       "https://www.amctheatres.com/movie-theatres/san-francisco/amc-metreon-16/showtimes",
@@ -19,7 +19,7 @@ export const THEATRES: ScrapeTheatre[] = [
   },
   {
     chain: "AMC",
-    externalId: "AMC_CITYWALK_TODO",
+    externalId: "amc-citywalk-hollywood",
     name: "Universal Cinema AMC at CityWalk Hollywood & IMAX",
     showtimesUrl:
       "https://www.amctheatres.com/movie-theatres/los-angeles/universal-cinema-amc-at-citywalk-hollywood/showtimes",

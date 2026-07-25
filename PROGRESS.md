@@ -122,6 +122,61 @@ get showtimes until re-enabled. Consider an `enabled` flag on Theatre to label t
 - [2026-07-21] scraper: Regal skipped (deferred); SETUP.md/README rewritten for scraper architecture
 - [2026-07-21] app: full pipeline (auth/DB/ingest/emails/reminders/dashboard) built, reviewed, builds
 
+## Empty-dashboard fix: self-healing bootstrap (branch claude/showtimes-ui-not-populating-wyaawe)
+- ROOT CAUSE (run #30169051247, 2026-07-25 18:09Z): prod Neon DB had ZERO Theatre and ZERO
+  Movie rows — `prisma db push` was run, `db:seed` never was. Scraper was healthy the whole
+  time (Metreon 1005/97 70mm, CityWalk 1681/218 70mm) but /api/ingest returned
+  showtimesUpserted:0 + errors ["unknown theatre (AMC/AMC_METREON_TODO)", ...] every 15 min,
+  and the workflow stayed GREEN. Confirmed twice over: /api/scrape-config also returned 200
+  with an empty list → scraper fell back to its local list of *_TODO placeholder ids.
+- lib/bootstrap.ts (NEW) ensureBootstrapped(): Theatre count 0 → createMany all 6 from
+  lib/theatres.ts; non-empty → backfill showtimesUrl ONLY where null/empty (never overwrites
+  operator data, never touches other fields). Movie count 0 → create Odyssey from shared
+  ODYSSEY_MOVIE. Never throws; failures surface in returned errors[]. Module-level `inFlight`
+  guard runs the check once per warm instance and CLEARS on rejection *or* on a resolved
+  result carrying errors (otherwise a transient DB blip wedges the instance permanently).
+- Called at top of /api/ingest + /api/scrape-config; result echoed as `bootstrap:{}` in both
+  responses so the Actions log shows what self-healed.
+- lib/theatres.ts: added shared ODYSSEY_MOVIE (prisma/seed.ts now imports it — no drift);
+  AMC externalIds AMC_METREON_TODO/AMC_CITYWALK_TODO → amc-metreon-16/amc-citywalk-hollywood
+  (DB keys only; scraping is DOM-based off showtimesUrl). scraper/theatres.ts kept in sync.
+- LOUD FAILURE: scraper/shouldFailRun.ts (pure, tested) + scrape.ts — exit 1 when NOT a dry
+  run and any of: postFailed (POST threw or !res.ok), pipeline errors[] non-empty,
+  activeMovies===0, or theatresPosted>0 with theatresMatched===0. activeMovies/theatresMatched
+  absent (older deployed app) = unknown, never fails. An honest zero-70mm night does NOT red.
+- HARDENING (2nd pass, review of 95c239e — all were FALSE-RED or silent-green bugs in the
+  hardening itself; do not reintroduce):
+  * bootstrap is now UNCONDITIONALLY idempotent (createMany skipDuplicates + movie upsert
+    update:{}), NOT count===0 gated. Count-gating raced (scrape-config and ingest hit
+    different serverless instances, both saw count 0, loser threw P2002 → red run) and could
+    never heal a partially-populated table — notably any DB still holding the old
+    AMC_*_TODO ids, which has count>0 so the new slug rows would never be created.
+    TRADE-OFF ACCEPTED: a deliberately-deleted seed theatre gets recreated.
+  * DROPPED the old fail rule posted70mm>0 && showtimesUpserted===0. is70mm comes only from
+    the AMC experience heading (parseAmc.ts, no movie involved) while ingest only upserts
+    matches against an ACTIVE Movie → would have gone red every 15 min once Odyssey ends its
+    run. Replaced with explicit activeMovies/theatresMatched signals from the response.
+  * scrape.ts: res.ok now checked and the POST catch no longer `process.exit(allErrored?1:0)`
+    early — app-down / ingest-500 / unparsable-body previously stayed GREEN (allErrored is
+    false because the SCRAPES succeeded). That is the loudest failure class this change exists
+    to surface.
+  * /api/ingest splits errors (bootstrap+pipeline, fails the run) from notifyErrors (email
+    sends, must NOT fail the run — one bouncing subscriber shouldn't red the scraper).
+  * scrape.yml watchdog step got `always()`: without it any red scraper step skipped the
+    heartbeat check, silently disabling Regal-PC-offline alerting.
+  * lib/redact.ts: repo is PUBLIC and scrape.ts logs the whole ingest response verbatim into
+    world-readable Actions logs; Prisma connection errors embed the Neon host/credentials.
+    Applied at both route boundaries, to nested bootstrap.errors AND the flattened errors[].
+  * lib/pipeline.ts: theatre-lookup catch now increments theatresSkipped so
+    matched+skipped===inputs.length (load-bearing for the theatresMatched===0 fail rule).
+- /api/ingest response: theatresIngested (counted POSTs, read like success) → theatresMatched
+  + theatresSkipped, sourced from ingestAndDetect's return, not error-string matching.
+- TESTS: 27 pass (was 19). test/bootstrap.test.ts (empty DB / populated no-op / partial
+  backfill, prisma mocked via vi.doMock + resetModules to defeat the guard);
+  test/shouldFailRun.test.ts (5 cases). typecheck + scraper tsc clean.
+- EXPECTED AFTER MERGE TO MAIN: next */15 run logs theatresCreated:6/moviesCreated:1, then
+  showtimesUpserted in the hundreds; dashboard populates within ~15 min. If not, run goes RED.
+
 ## Last Session
 - Status: ALL 3 CHANGES BUILT on claude/session-tnklc6. #1 (AMC parser) validated live in CI. #2 (dashboard) built. #3 (Regal-on-PC + alerts) built, tsc+build pass (can't runtime-test w/o PC+DB migration).
 - USER TODO to go live: (1) merge claude/session-tnklc6 → main (activates AMC fix on the */15 schedule + deploys new routes). (2) `npx prisma db push` for SourceHealth table. (3) Vercel envs ALERT_EMAIL=pradbiswas@gmail.com, HEARTBEAT_STALE_MINUTES=45. (4) Set up PC per scraper/REGAL-PC-SETUP.md (SCRAPE_CHAINS=REGAL). (5) Verify parseRegal.ts vs a real payload from the PC.
