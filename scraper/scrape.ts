@@ -3,6 +3,7 @@ import { THEATRES, regalDateRange, regalGetShowtimesPath, todayYmd } from "./the
 import { normalizeAmcRecords, type RawAmcRecord } from "./parseAmc";
 import { parseRegalJson } from "./parseRegal";
 import { probeHorizon } from "./probe";
+import { shouldFailRun } from "./shouldFailRun";
 import type { NormalizedShowtimeLite, ScrapeTheatre } from "./types";
 
 const CHROME_UA =
@@ -368,7 +369,9 @@ async function main() {
     runReminders: true,
     ...(sourceHealth ? { sourceHealth } : {}),
   };
+  const posted70mm = body.theatres.reduce((sum, t) => sum + t.showtimes.length, 0);
 
+  let ingestFailed = false;
   try {
     const res = await fetch(`${APP_URL}/api/ingest`, {
       method: "POST",
@@ -380,6 +383,19 @@ async function main() {
     });
     const json = await res.json();
     console.log("[scrape] ingest response:", JSON.stringify(json));
+
+    const showtimesUpserted =
+      typeof json?.showtimesUpserted === "number" ? json.showtimesUpserted : 0;
+    const responseErrors: string[] = Array.isArray(json?.errors) ? json.errors : [];
+    if (
+      shouldFailRun({ posted70mm, showtimesUpserted, errors: responseErrors, dryRun: DRY_RUN })
+    ) {
+      ingestFailed = true;
+      console.error(
+        `[scrape] FAILED: posted ${posted70mm} 70mm showtimes but ingest reported ` +
+          `showtimesUpserted=${showtimesUpserted}, errors=${JSON.stringify(responseErrors)}`
+      );
+    }
   } catch (err) {
     console.error(
       "[scrape] POST to /api/ingest failed:",
@@ -391,7 +407,7 @@ async function main() {
   }
 
   const allErrored = results.every((r) => r.error);
-  process.exit(allErrored ? 1 : 0);
+  process.exit(allErrored || ingestFailed ? 1 : 0);
 }
 
 main().catch((err) => {

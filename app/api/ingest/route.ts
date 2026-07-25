@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
 import { ingestAndDetect, sendDropDigest } from "@/lib/pipeline";
 import { recordHeartbeat } from "@/lib/heartbeat";
+import { ensureBootstrapped } from "@/lib/bootstrap";
 import type { NormalizedShowtime } from "@/lib/adapters/types";
 
 function safeEqual(a: string, b: string): boolean {
@@ -95,6 +96,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const bootstrap = await ensureBootstrapped();
+
   let body: RawBody;
   try {
     body = await req.json();
@@ -127,17 +130,23 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const { showtimesUpserted, newDropEventIds, errors: ingestErrors } = await ingestAndDetect(
-    normalized
-  );
+  const {
+    showtimesUpserted,
+    newDropEventIds,
+    errors: ingestErrors,
+    theatresMatched,
+    theatresSkipped,
+  } = await ingestAndDetect(normalized);
   const { digestsSent, errors: digestErrors } = await sendDropDigest();
 
   return NextResponse.json({
-    theatresIngested: normalized.length,
+    bootstrap,
+    theatresMatched,
+    theatresSkipped,
     showtimesUpserted,
     newDrops: newDropEventIds.length,
     digestsSent,
     heartbeatRecorded,
-    errors: [...ingestErrors, ...digestErrors],
+    errors: [...bootstrap.errors, ...ingestErrors, ...digestErrors],
   });
 }

@@ -44,9 +44,17 @@ export async function loadShowtimeLinks(
 // of newly created DropEvents so the caller can send drop emails for them.
 export async function ingestAndDetect(
   inputs: TheatreIngest[]
-): Promise<{ showtimesUpserted: number; newDropEventIds: string[]; errors: string[] }> {
+): Promise<{
+  showtimesUpserted: number;
+  newDropEventIds: string[];
+  errors: string[];
+  theatresMatched: number;
+  theatresSkipped: number;
+}> {
   const errors: string[] = [];
   let showtimesUpserted = 0;
+  let theatresMatched = 0;
+  let theatresSkipped = 0;
 
   const movies = await prisma.movie.findMany({ where: { active: true } });
 
@@ -74,8 +82,10 @@ export async function ingestAndDetect(
 
     if (!theatre) {
       errors.push(`unknown theatre (${input.chain}/${input.externalId}); skipping`);
+      theatresSkipped++;
       continue;
     }
+    theatresMatched++;
 
     for (const showtime of input.showtimes) {
       for (const movie of movies) {
@@ -180,7 +190,7 @@ export async function ingestAndDetect(
     }
   }
 
-  return { showtimesUpserted, newDropEventIds, errors };
+  return { showtimesUpserted, newDropEventIds, errors, theatresMatched, theatresSkipped };
 }
 
 // Sends the initial drop email to subscribers of each newly detected drop.

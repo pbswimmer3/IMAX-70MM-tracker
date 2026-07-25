@@ -10,10 +10,11 @@ export interface TheatreSeed {
 // Seed source of truth for the theatres this tracker watches.
 // Regal externalIds are the numeric cinema ids from regmovies.com URLs
 // (the same value used by getShowtimes?theatres={id}) — verified.
-// AMC externalIds are the numeric theatreIds required by api.amctheatres.com.
-// AMC does not expose these publicly (its URLs use name slugs), so they stay
-// as placeholders until resolved with your vendor key: run `npm run resolve:amc`
-// and paste the printed ids in below. Adapters fail gracefully until then.
+// AMC externalIds are stable name slugs (AMC's public URLs use slugs, not the
+// numeric theatreIds required by api.amctheatres.com, which are gated behind a
+// separate vendor grant — see scripts/resolve-amc.ts if that's ever needed).
+// These slugs are only used as DB keys, not to fetch anything: scraping is
+// DOM-based off showtimesUrl below.
 //
 // showtimesUrl points at the theatre's server-rendered /showtimes page, used
 // by the headless-browser scraper (direct APIs are dead: AMC 403s, Regal
@@ -23,7 +24,7 @@ export const THEATRES: TheatreSeed[] = [
     chain: "AMC",
     name: "AMC Metreon 16 & IMAX",
     city: "San Francisco, CA",
-    externalId: "AMC_METREON_TODO", // TODO: run `npm run resolve:amc`
+    externalId: "amc-metreon-16",
     priority: 1,
     showtimesUrl:
       "https://www.amctheatres.com/movie-theatres/san-francisco/amc-metreon-16/showtimes",
@@ -40,7 +41,7 @@ export const THEATRES: TheatreSeed[] = [
     chain: "AMC",
     name: "Universal Cinema AMC at CityWalk Hollywood & IMAX",
     city: "Universal City, CA",
-    externalId: "AMC_CITYWALK_TODO", // TODO: run `npm run resolve:amc`
+    externalId: "amc-citywalk-hollywood",
     priority: 3,
     showtimesUrl:
       "https://www.amctheatres.com/movie-theatres/los-angeles/universal-cinema-amc-at-citywalk-hollywood/showtimes",
@@ -70,3 +71,33 @@ export const THEATRES: TheatreSeed[] = [
     showtimesUrl: "https://www.regmovies.com/theatres/regal-edwards-ontario-palace-1026",
   },
 ];
+
+export interface MovieSeed {
+  title: string;
+  slug: string;
+  active: boolean;
+  matchers: {
+    amc: { movieIds: string[]; attributeCodes: string[]; titlePattern: string };
+    regal: { hoCodes: string[]; titlePattern: string };
+  };
+}
+
+// Seed source of truth for "The Odyssey" — shared by prisma/seed.ts (explicit
+// local seeding) and lib/bootstrap.ts (self-healing seed on a prod DB missing
+// this row) so the two can never drift.
+export const ODYSSEY_MOVIE: MovieSeed = {
+  title: "The Odyssey",
+  slug: "the-odyssey",
+  active: true,
+  matchers: {
+    amc: {
+      movieIds: ["76238", "80679"],
+      attributeCodes: ["IMAX70MM", "70MM", "IMAXWITH70MM"],
+      titlePattern: "odyssey",
+    },
+    regal: {
+      hoCodes: ["ho00019076", "ho00021807"],
+      titlePattern: "odyssey",
+    },
+  },
+};

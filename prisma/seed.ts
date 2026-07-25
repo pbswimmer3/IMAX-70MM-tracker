@@ -1,5 +1,5 @@
 import { PrismaClient } from "@prisma/client";
-import { THEATRES } from "../lib/theatres";
+import { THEATRES, ODYSSEY_MOVIE } from "../lib/theatres";
 
 const prisma = new PrismaClient();
 
@@ -25,37 +25,17 @@ async function main() {
   }
 
   await prisma.movie.upsert({
-    where: { slug: "the-odyssey" },
+    where: { slug: ODYSSEY_MOVIE.slug },
     update: {
-      title: "The Odyssey",
-      active: true,
-      matchers: {
-        amc: {
-          movieIds: ["76238", "80679"],
-          attributeCodes: ["IMAX70MM", "70MM", "IMAXWITH70MM"],
-          titlePattern: "odyssey",
-        },
-        regal: {
-          hoCodes: ["ho00019076", "ho00021807"],
-          titlePattern: "odyssey",
-        },
-      },
+      title: ODYSSEY_MOVIE.title,
+      active: ODYSSEY_MOVIE.active,
+      matchers: ODYSSEY_MOVIE.matchers,
     },
     create: {
-      title: "The Odyssey",
-      slug: "the-odyssey",
-      active: true,
-      matchers: {
-        amc: {
-          movieIds: ["76238", "80679"],
-          attributeCodes: ["IMAX70MM", "70MM", "IMAXWITH70MM"],
-          titlePattern: "odyssey",
-        },
-        regal: {
-          hoCodes: ["ho00019076", "ho00021807"],
-          titlePattern: "odyssey",
-        },
-      },
+      title: ODYSSEY_MOVIE.title,
+      slug: ODYSSEY_MOVIE.slug,
+      active: ODYSSEY_MOVIE.active,
+      matchers: ODYSSEY_MOVIE.matchers,
     },
   });
 
