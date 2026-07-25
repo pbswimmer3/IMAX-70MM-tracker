@@ -369,7 +369,7 @@ async function main() {
     runReminders: true,
     ...(sourceHealth ? { sourceHealth } : {}),
   };
-  const posted70mm = body.theatres.reduce((sum, t) => sum + t.showtimes.length, 0);
+  const theatresPosted = body.theatres.length;
 
   let ingestFailed = false;
   try {
@@ -381,29 +381,56 @@ async function main() {
       },
       body: JSON.stringify(body),
     });
-    const json = await res.json();
-    console.log("[scrape] ingest response:", JSON.stringify(json));
 
-    const showtimesUpserted =
-      typeof json?.showtimesUpserted === "number" ? json.showtimesUpserted : 0;
-    const responseErrors: string[] = Array.isArray(json?.errors) ? json.errors : [];
-    if (
-      shouldFailRun({ posted70mm, showtimesUpserted, errors: responseErrors, dryRun: DRY_RUN })
-    ) {
-      ingestFailed = true;
+    if (!res.ok) {
+      const bodyText = await res.text().catch(() => "<no body>");
       console.error(
-        `[scrape] FAILED: posted ${posted70mm} 70mm showtimes but ingest reported ` +
-          `showtimesUpserted=${showtimesUpserted}, errors=${JSON.stringify(responseErrors)}`
+        `[scrape] ingest POST failed: status=${res.status}, body=${bodyText.slice(0, 2000)}`
       );
+      ingestFailed = shouldFailRun({
+        postFailed: true,
+        errors: [],
+        theatresPosted,
+        dryRun: DRY_RUN,
+      });
+    } else {
+      const json = await res.json();
+      console.log("[scrape] ingest response:", JSON.stringify(json));
+
+      const theatresMatched =
+        typeof json?.theatresMatched === "number" ? json.theatresMatched : undefined;
+      const activeMovies =
+        typeof json?.activeMovies === "number" ? json.activeMovies : undefined;
+      const responseErrors: string[] = Array.isArray(json?.errors) ? json.errors : [];
+
+      if (
+        shouldFailRun({
+          postFailed: false,
+          errors: responseErrors,
+          activeMovies,
+          theatresPosted,
+          theatresMatched,
+          dryRun: DRY_RUN,
+        })
+      ) {
+        ingestFailed = true;
+        console.error(
+          `[scrape] FAILED: theatresPosted=${theatresPosted}, theatresMatched=${theatresMatched}, ` +
+            `activeMovies=${activeMovies}, errors=${JSON.stringify(responseErrors)}`
+        );
+      }
     }
   } catch (err) {
     console.error(
       "[scrape] POST to /api/ingest failed:",
       err instanceof Error ? err.message : err
     );
-    const allErrored = results.every((r) => r.error);
-    process.exit(allErrored ? 1 : 0);
-    return;
+    ingestFailed = shouldFailRun({
+      postFailed: true,
+      errors: [],
+      theatresPosted,
+      dryRun: DRY_RUN,
+    });
   }
 
   const allErrored = results.every((r) => r.error);

@@ -140,9 +140,35 @@ get showtimes until re-enabled. Consider an `enabled` flag on Theatre to label t
 - lib/theatres.ts: added shared ODYSSEY_MOVIE (prisma/seed.ts now imports it — no drift);
   AMC externalIds AMC_METREON_TODO/AMC_CITYWALK_TODO → amc-metreon-16/amc-citywalk-hollywood
   (DB keys only; scraping is DOM-based off showtimesUrl). scraper/theatres.ts kept in sync.
-- LOUD FAILURE: scraper/shouldFailRun.ts (pure, tested) + scrape.ts — exit 1 when not a dry
-  run and (ingest errors[] non-empty OR posted70mm>0 with showtimesUpserted===0). posted70mm
-  counts the is70mm-filtered body, so an honest zero-70mm night does NOT go red.
+- LOUD FAILURE: scraper/shouldFailRun.ts (pure, tested) + scrape.ts — exit 1 when NOT a dry
+  run and any of: postFailed (POST threw or !res.ok), pipeline errors[] non-empty,
+  activeMovies===0, or theatresPosted>0 with theatresMatched===0. activeMovies/theatresMatched
+  absent (older deployed app) = unknown, never fails. An honest zero-70mm night does NOT red.
+- HARDENING (2nd pass, review of 95c239e — all were FALSE-RED or silent-green bugs in the
+  hardening itself; do not reintroduce):
+  * bootstrap is now UNCONDITIONALLY idempotent (createMany skipDuplicates + movie upsert
+    update:{}), NOT count===0 gated. Count-gating raced (scrape-config and ingest hit
+    different serverless instances, both saw count 0, loser threw P2002 → red run) and could
+    never heal a partially-populated table — notably any DB still holding the old
+    AMC_*_TODO ids, which has count>0 so the new slug rows would never be created.
+    TRADE-OFF ACCEPTED: a deliberately-deleted seed theatre gets recreated.
+  * DROPPED the old fail rule posted70mm>0 && showtimesUpserted===0. is70mm comes only from
+    the AMC experience heading (parseAmc.ts, no movie involved) while ingest only upserts
+    matches against an ACTIVE Movie → would have gone red every 15 min once Odyssey ends its
+    run. Replaced with explicit activeMovies/theatresMatched signals from the response.
+  * scrape.ts: res.ok now checked and the POST catch no longer `process.exit(allErrored?1:0)`
+    early — app-down / ingest-500 / unparsable-body previously stayed GREEN (allErrored is
+    false because the SCRAPES succeeded). That is the loudest failure class this change exists
+    to surface.
+  * /api/ingest splits errors (bootstrap+pipeline, fails the run) from notifyErrors (email
+    sends, must NOT fail the run — one bouncing subscriber shouldn't red the scraper).
+  * scrape.yml watchdog step got `always()`: without it any red scraper step skipped the
+    heartbeat check, silently disabling Regal-PC-offline alerting.
+  * lib/redact.ts: repo is PUBLIC and scrape.ts logs the whole ingest response verbatim into
+    world-readable Actions logs; Prisma connection errors embed the Neon host/credentials.
+    Applied at both route boundaries, to nested bootstrap.errors AND the flattened errors[].
+  * lib/pipeline.ts: theatre-lookup catch now increments theatresSkipped so
+    matched+skipped===inputs.length (load-bearing for the theatresMatched===0 fail rule).
 - /api/ingest response: theatresIngested (counted POSTs, read like success) → theatresMatched
   + theatresSkipped, sourced from ingestAndDetect's return, not error-string matching.
 - TESTS: 27 pass (was 19). test/bootstrap.test.ts (empty DB / populated no-op / partial

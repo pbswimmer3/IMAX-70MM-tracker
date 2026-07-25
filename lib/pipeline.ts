@@ -50,6 +50,7 @@ export async function ingestAndDetect(
   errors: string[];
   theatresMatched: number;
   theatresSkipped: number;
+  activeMovies: number;
 }> {
   const errors: string[] = [];
   let showtimesUpserted = 0;
@@ -77,6 +78,7 @@ export async function ingestAndDetect(
           err instanceof Error ? err.message : err
         }`
       );
+      theatresSkipped++;
       continue;
     }
 
@@ -190,7 +192,14 @@ export async function ingestAndDetect(
     }
   }
 
-  return { showtimesUpserted, newDropEventIds, errors, theatresMatched, theatresSkipped };
+  return {
+    showtimesUpserted,
+    newDropEventIds,
+    errors,
+    theatresMatched,
+    theatresSkipped,
+    activeMovies: movies.length,
+  };
 }
 
 // Sends the initial drop email to subscribers of each newly detected drop.
