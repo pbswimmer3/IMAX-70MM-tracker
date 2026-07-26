@@ -22,7 +22,11 @@ on:
     - cron: "*/15 * * * *"
 
 concurrency:
-  group: scrape
+  # Scheduled runs share one group, so a slow tick is superseded by the next
+  # one rather than piling up. Manual runs get a group of their own, keyed by
+  # run_id: a FULL_SCAN diagnostic or backfill takes ~10 minutes and the */15
+  # cron would otherwise cancel it mid-scan (it did — run 30216990559).
+  group: ${{ github.event_name == 'workflow_dispatch' && format('scrape-manual-{0}', github.run_id) || 'scrape' }}
   cancel-in-progress: true
 
 jobs:
