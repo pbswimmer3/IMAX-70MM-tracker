@@ -1,11 +1,13 @@
 import { prisma } from "@/lib/prisma";
 import { THEATRES, ODYSSEY_MOVIE } from "@/lib/theatres";
+import { isInertMatchers } from "@/lib/match";
 import type { Prisma } from "@prisma/client";
 
 export interface BootstrapResult {
   theatresCreated: number;
   urlsBackfilled: number;
   moviesCreated: number;
+  matchersRepaired: number;
   errors: string[];
 }
 
@@ -33,6 +35,17 @@ let inFlight: Promise<BootstrapResult> | null = null;
 // an operator deliberately deleted from THEATRES' seed set will be recreated
 // on the next bootstrap — accepted as the cost of race-safety and partial-set
 // healing.
+//
+// Narrow matchers repair: the /movies UI historically shipped a default
+// matcher template that is inert (isInertMatchers) — it can never match a
+// showtime. If prod's ODYSSEY_MOVIE row was created through that form before
+// the template was fixed, it can be stuck silently matching nothing forever.
+// On each bootstrap, if (and only if) the seeded row already exists AND its
+// matchers are provably inert, its matchers are overwritten with
+// ODYSSEY_MOVIE.matchers. This never touches any other movie row, never
+// touches active/title/other fields, and never overwrites a matcher set that
+// actually works (including an operator's own hand-edit) — it is strictly a
+// repair for the known-bad placeholder, not a general reseed.
 export function ensureBootstrapped(): Promise<BootstrapResult> {
   if (!inFlight) {
     inFlight = runBootstrap()
@@ -46,6 +59,7 @@ export function ensureBootstrapped(): Promise<BootstrapResult> {
           theatresCreated: 0,
           urlsBackfilled: 0,
           moviesCreated: 0,
+          matchersRepaired: 0,
           errors: [`bootstrap failed: ${err instanceof Error ? err.message : String(err)}`],
         };
       });
@@ -58,6 +72,7 @@ async function runBootstrap(): Promise<BootstrapResult> {
   let theatresCreated = 0;
   let urlsBackfilled = 0;
   let moviesCreated = 0;
+  let matchersRepaired = 0;
 
   try {
     const created = await prisma.theatre.createMany({
@@ -109,10 +124,18 @@ async function runBootstrap(): Promise<BootstrapResult> {
         matchers: ODYSSEY_MOVIE.matchers as unknown as Prisma.InputJsonValue,
       },
     });
-    if (!existingMovie) moviesCreated = 1;
+    if (!existingMovie) {
+      moviesCreated = 1;
+    } else if (isInertMatchers(existingMovie.matchers)) {
+      await prisma.movie.update({
+        where: { slug: ODYSSEY_MOVIE.slug },
+        data: { matchers: ODYSSEY_MOVIE.matchers as unknown as Prisma.InputJsonValue },
+      });
+      matchersRepaired = 1;
+    }
   } catch (err) {
     errors.push(`movie bootstrap failed: ${err instanceof Error ? err.message : err}`);
   }
 
-  return { theatresCreated, urlsBackfilled, moviesCreated, errors };
+  return { theatresCreated, urlsBackfilled, moviesCreated, matchersRepaired, errors };
 }

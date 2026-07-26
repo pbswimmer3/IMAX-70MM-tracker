@@ -4,9 +4,24 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 const DEFAULT_MATCHERS = `{
-  "amc": { "attributeCodes": ["IMAX70MM", "70MM"], "titlePattern": "" },
+  "amc": { "movieIds": [], "titlePattern": "" },
   "regal": { "hoCodes": [], "titlePattern": "" }
 }`;
+
+// Builds a matcher set prefilled with a lowercased title-derived
+// titlePattern, so picking a TMDB search result produces a working matcher
+// instead of the inert default template.
+function buildPrefilledMatchers(title: string): string {
+  const titlePattern = title.trim().toLowerCase();
+  return JSON.stringify(
+    {
+      amc: { movieIds: [], titlePattern },
+      regal: { hoCodes: [], titlePattern },
+    },
+    null,
+    2
+  );
+}
 
 type SearchResult = {
   tmdbId: number;
@@ -30,6 +45,10 @@ export function AddMovieForm() {
   const [submitting, setSubmitting] = useState(false);
 
   const selectedRef = useRef(false);
+  // Tracks the last value this form itself put into the matchers textarea
+  // (default or auto-prefilled), so selectMovie only overwrites it when the
+  // user hasn't hand-edited it away in the meantime.
+  const lastAutoMatchersRef = useRef(DEFAULT_MATCHERS);
 
   // Debounced TMDB search as the user types in the search bar.
   useEffect(() => {
@@ -82,6 +101,13 @@ export function AddMovieForm() {
     setQuery(movie.year ? `${movie.title} (${movie.year})` : movie.title);
     setResults([]);
     setSearchError(null);
+
+    const prefilled = buildPrefilledMatchers(movie.title);
+    setMatchers((current) => {
+      if (current !== lastAutoMatchersRef.current) return current;
+      lastAutoMatchersRef.current = prefilled;
+      return prefilled;
+    });
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -120,6 +146,7 @@ export function AddMovieForm() {
     setQuery("");
     setResults([]);
     setMatchers(DEFAULT_MATCHERS);
+    lastAutoMatchersRef.current = DEFAULT_MATCHERS;
     router.refresh();
   }
 
@@ -170,6 +197,10 @@ export function AddMovieForm() {
         value={matchers}
         onChange={(e) => setMatchers(e.target.value)}
       />
+      <p className="search-hint" style={{ marginTop: 4 }}>
+        At least one of titlePattern / amc.movieIds / regal.hoCodes must be
+        non-empty, or this movie will never match any showtime.
+      </p>
 
       {error && (
         <p style={{ color: "var(--safelight)", fontSize: 13 }}>{error}</p>

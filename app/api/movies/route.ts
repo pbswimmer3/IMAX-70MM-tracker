@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { isInertMatchers } from "@/lib/match";
 
 // Admins may add global movies. If ADMIN_EMAILS is unset, any signed-in user is
 // allowed (single-user convenience) — set ADMIN_EMAILS (comma-separated) to lock
@@ -36,6 +37,15 @@ export async function POST(req: NextRequest) {
   const matchers = body.matchers ?? {};
   if (!isPlainObject(matchers)) {
     return NextResponse.json({ error: "matchers must be a JSON object" }, { status: 400 });
+  }
+  if (isInertMatchers(matchers)) {
+    return NextResponse.json(
+      {
+        error:
+          "matchers cannot match anything: provide a non-empty titlePattern, or amc.movieIds / regal.hoCodes. Note attributeCodes is not used for matching.",
+      },
+      { status: 400 }
+    );
   }
 
   try {
