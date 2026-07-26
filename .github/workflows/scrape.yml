@@ -14,6 +14,10 @@ on:
         description: "Dry run (log only, do not POST to /api/ingest)"
         type: boolean
         default: false
+      full_scan:
+        description: "Ignore stored booking horizons and rescan from today (slow; use to backfill)"
+        type: boolean
+        default: false
   schedule:
     - cron: "*/15 * * * *"
 
@@ -38,7 +42,7 @@ jobs:
         run: cd scraper && npx playwright install --with-deps chromium
 
       - name: Run scraper
-        run: cd scraper && DRY_RUN=${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }} SCRAPE_CHAINS=AMC APP_URL=${{ secrets.APP_URL }} CRON_SECRET=${{ secrets.CRON_SECRET }} npx tsx scrape.ts
+        run: cd scraper && DRY_RUN=${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }} FULL_SCAN=${{ github.event_name == 'schedule' && 'false' || inputs.full_scan }} SCRAPE_CHAINS=AMC APP_URL=${{ secrets.APP_URL }} CRON_SECRET=${{ secrets.CRON_SECRET }} npx tsx scrape.ts
 
       # Watchdog for the Regal-on-PC scraper. Runs even though this workflow
       # only scrapes AMC: GitHub Actions stays up when the home PC is off, so it
