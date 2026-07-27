@@ -1,4 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { ODYSSEY_MOVIE } from "@/lib/theatres";
+
+// A non-empty, matchesMovie-usable matcher set — used wherever a test's
+// existing movie row should NOT trigger the inert-matchers repair, so those
+// tests stay focused on their original (non-matchers) assertions.
+const USABLE_MATCHERS = { amc: { movieIds: ["76238"] }, regal: { hoCodes: ["ho00019076"] } };
+
+// The exact inert default template the /movies UI used to ship — a row
+// created through it can never match a showtime.
+const INERT_MATCHERS = {
+  amc: { attributeCodes: ["IMAX70MM", "70MM"], titlePattern: "" },
+  regal: { hoCodes: [], titlePattern: "" },
+};
 
 interface PrismaMock {
   theatre: {
@@ -9,6 +22,7 @@ interface PrismaMock {
   movie: {
     findUnique: ReturnType<typeof vi.fn>;
     upsert: ReturnType<typeof vi.fn>;
+    update: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -22,6 +36,7 @@ function makePrismaMock(): PrismaMock {
     movie: {
       findUnique: vi.fn(),
       upsert: vi.fn(),
+      update: vi.fn(),
     },
   };
 }
@@ -47,6 +62,7 @@ describe("ensureBootstrapped", () => {
       theatresCreated: 6,
       urlsBackfilled: 0,
       moviesCreated: 1,
+      matchersRepaired: 0,
       errors: [],
     });
     expect(prismaMock.theatre.createMany).toHaveBeenCalledTimes(1);
@@ -67,7 +83,11 @@ describe("ensureBootstrapped", () => {
       id: "t1",
       showtimesUrl: "https://existing.example.com/showtimes",
     });
-    prismaMock.movie.findUnique.mockResolvedValue({ id: "m1", slug: "the-odyssey" });
+    prismaMock.movie.findUnique.mockResolvedValue({
+      id: "m1",
+      slug: "the-odyssey",
+      matchers: USABLE_MATCHERS,
+    });
     prismaMock.movie.upsert.mockResolvedValue({ id: "m1" });
 
     vi.doMock("@/lib/prisma", () => ({ prisma: prismaMock }));
@@ -79,6 +99,7 @@ describe("ensureBootstrapped", () => {
       theatresCreated: 0,
       urlsBackfilled: 0,
       moviesCreated: 0,
+      matchersRepaired: 0,
       errors: [],
     });
     expect(prismaMock.theatre.update).not.toHaveBeenCalled();
@@ -88,6 +109,7 @@ describe("ensureBootstrapped", () => {
     expect(prismaMock.movie.upsert).toHaveBeenCalledWith(
       expect.objectContaining({ update: {} })
     );
+    expect(prismaMock.movie.update).not.toHaveBeenCalled();
   });
 
   it("heals a partially-populated table (old seed ids) by creating the missing new-slug rows", async () => {
@@ -130,7 +152,7 @@ describe("ensureBootstrapped", () => {
       }
     );
     prismaMock.theatre.update.mockResolvedValue({});
-    prismaMock.movie.findUnique.mockResolvedValue({ id: "m1" });
+    prismaMock.movie.findUnique.mockResolvedValue({ id: "m1", matchers: USABLE_MATCHERS });
     prismaMock.movie.upsert.mockResolvedValue({ id: "m1" });
 
     vi.doMock("@/lib/prisma", () => ({ prisma: prismaMock }));
@@ -156,7 +178,7 @@ describe("ensureBootstrapped", () => {
       id: "t1",
       showtimesUrl: "https://custom.example.com/showtimes",
     });
-    prismaMock.movie.findUnique.mockResolvedValue({ id: "m1" });
+    prismaMock.movie.findUnique.mockResolvedValue({ id: "m1", matchers: USABLE_MATCHERS });
     prismaMock.movie.upsert.mockResolvedValue({ id: "m1" });
 
     vi.doMock("@/lib/prisma", () => ({ prisma: prismaMock }));
@@ -176,7 +198,7 @@ describe("ensureBootstrapped", () => {
     prismaMock.theatre.findUnique
       .mockRejectedValueOnce(new Error("transient db blip"))
       .mockResolvedValue({ id: "t1", showtimesUrl: "https://existing.example.com/showtimes" });
-    prismaMock.movie.findUnique.mockResolvedValue({ id: "m1" });
+    prismaMock.movie.findUnique.mockResolvedValue({ id: "m1", matchers: USABLE_MATCHERS });
     prismaMock.movie.upsert.mockResolvedValue({ id: "m1" });
 
     vi.doMock("@/lib/prisma", () => ({ prisma: prismaMock }));
@@ -191,5 +213,85 @@ describe("ensureBootstrapped", () => {
     // A retry re-ran the whole bootstrap rather than replaying the cached
     // errored result.
     expect(prismaMock.theatre.createMany).toHaveBeenCalledTimes(2);
+  });
+
+  it("repairs the seeded movie's matchers when they are inert", async () => {
+    const prismaMock = makePrismaMock();
+    prismaMock.theatre.createMany.mockResolvedValue({ count: 0 });
+    prismaMock.theatre.findUnique.mockResolvedValue({
+      id: "t1",
+      showtimesUrl: "https://existing.example.com/showtimes",
+    });
+    prismaMock.movie.findUnique.mockResolvedValue({
+      id: "m1",
+      slug: "the-odyssey",
+      matchers: INERT_MATCHERS,
+    });
+    prismaMock.movie.upsert.mockResolvedValue({ id: "m1" });
+    prismaMock.movie.update.mockResolvedValue({ id: "m1" });
+
+    vi.doMock("@/lib/prisma", () => ({ prisma: prismaMock }));
+    const { ensureBootstrapped } = await import("@/lib/bootstrap");
+
+    const result = await ensureBootstrapped();
+
+    expect(result.matchersRepaired).toBe(1);
+    expect(result.errors).toEqual([]);
+    expect(prismaMock.movie.update).toHaveBeenCalledTimes(1);
+    expect(prismaMock.movie.update).toHaveBeenCalledWith({
+      where: { slug: ODYSSEY_MOVIE.slug },
+      data: { matchers: ODYSSEY_MOVIE.matchers },
+    });
+  });
+
+  it("does not touch the seeded movie's matchers when they are already usable", async () => {
+    const prismaMock = makePrismaMock();
+    prismaMock.theatre.createMany.mockResolvedValue({ count: 0 });
+    prismaMock.theatre.findUnique.mockResolvedValue({
+      id: "t1",
+      showtimesUrl: "https://existing.example.com/showtimes",
+    });
+    prismaMock.movie.findUnique.mockResolvedValue({
+      id: "m1",
+      slug: "the-odyssey",
+      matchers: USABLE_MATCHERS,
+    });
+    prismaMock.movie.upsert.mockResolvedValue({ id: "m1" });
+
+    vi.doMock("@/lib/prisma", () => ({ prisma: prismaMock }));
+    const { ensureBootstrapped } = await import("@/lib/bootstrap");
+
+    const result = await ensureBootstrapped();
+
+    expect(result.matchersRepaired).toBe(0);
+    expect(prismaMock.movie.update).not.toHaveBeenCalled();
+  });
+
+  it("only ever queries/updates the ODYSSEY_MOVIE slug, never another movie row", async () => {
+    const prismaMock = makePrismaMock();
+    prismaMock.theatre.createMany.mockResolvedValue({ count: 0 });
+    prismaMock.theatre.findUnique.mockResolvedValue({
+      id: "t1",
+      showtimesUrl: "https://existing.example.com/showtimes",
+    });
+    prismaMock.movie.findUnique.mockResolvedValue({
+      id: "m1",
+      slug: ODYSSEY_MOVIE.slug,
+      matchers: INERT_MATCHERS,
+    });
+    prismaMock.movie.upsert.mockResolvedValue({ id: "m1" });
+    prismaMock.movie.update.mockResolvedValue({ id: "m1" });
+
+    vi.doMock("@/lib/prisma", () => ({ prisma: prismaMock }));
+    const { ensureBootstrapped } = await import("@/lib/bootstrap");
+
+    await ensureBootstrapped();
+
+    expect(prismaMock.movie.findUnique).toHaveBeenCalledWith({
+      where: { slug: ODYSSEY_MOVIE.slug },
+    });
+    expect(prismaMock.movie.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { slug: ODYSSEY_MOVIE.slug } })
+    );
   });
 });

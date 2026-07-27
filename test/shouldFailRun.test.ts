@@ -10,6 +10,8 @@ describe("shouldFailRun", () => {
         activeMovies: 0,
         theatresPosted: 5,
         theatresMatched: 0,
+        showtimesPosted: 313,
+        showtimesUpserted: 0,
         dryRun: true,
       })
     ).toBe(false);
@@ -17,7 +19,13 @@ describe("shouldFailRun", () => {
 
   it("fails when the ingest POST itself failed", () => {
     expect(
-      shouldFailRun({ postFailed: true, errors: [], theatresPosted: 5, dryRun: false })
+      shouldFailRun({
+        postFailed: true,
+        errors: [],
+        theatresPosted: 5,
+        showtimesPosted: 0,
+        dryRun: false,
+      })
     ).toBe(true);
   });
 
@@ -29,6 +37,7 @@ describe("shouldFailRun", () => {
         theatresPosted: 5,
         theatresMatched: 5,
         activeMovies: 1,
+        showtimesPosted: 0,
         dryRun: false,
       })
     ).toBe(true);
@@ -42,6 +51,7 @@ describe("shouldFailRun", () => {
         activeMovies: 0,
         theatresPosted: 5,
         theatresMatched: 5,
+        showtimesPosted: 0,
         dryRun: false,
       })
     ).toBe(true);
@@ -55,6 +65,7 @@ describe("shouldFailRun", () => {
         activeMovies: 1,
         theatresPosted: 5,
         theatresMatched: 0,
+        showtimesPosted: 0,
         dryRun: false,
       })
     ).toBe(true);
@@ -68,6 +79,7 @@ describe("shouldFailRun", () => {
         activeMovies: 1,
         theatresPosted: 5,
         theatresMatched: 5,
+        showtimesPosted: 0,
         dryRun: false,
       })
     ).toBe(false);
@@ -84,6 +96,7 @@ describe("shouldFailRun", () => {
         activeMovies: 1,
         theatresPosted: 5,
         theatresMatched: 5,
+        showtimesPosted: 0,
         dryRun: false,
       })
     ).toBe(false);
@@ -95,6 +108,69 @@ describe("shouldFailRun", () => {
         postFailed: false,
         errors: [],
         theatresPosted: 5,
+        showtimesPosted: 0,
+        dryRun: false,
+      })
+    ).toBe(false);
+  });
+
+  it("fails when theatres and movies resolved, showtimes were posted, but zero landed", () => {
+    // The exact shape from the 2026-07-26 incident: theatresMatched=2,
+    // activeMovies=1, 313 70mm showtimes posted, 0 upserted, no errors. That
+    // combination can only be a matcher/validation bug.
+    expect(
+      shouldFailRun({
+        postFailed: false,
+        errors: [],
+        activeMovies: 1,
+        theatresPosted: 2,
+        theatresMatched: 2,
+        showtimesPosted: 313,
+        showtimesUpserted: 0,
+        dryRun: false,
+      })
+    ).toBe(true);
+  });
+
+  it("does not fail a legitimate no-70mm night (posted=0, upserted=0)", () => {
+    expect(
+      shouldFailRun({
+        postFailed: false,
+        errors: [],
+        activeMovies: 1,
+        theatresPosted: 2,
+        theatresMatched: 2,
+        showtimesPosted: 0,
+        showtimesUpserted: 0,
+        dryRun: false,
+      })
+    ).toBe(false);
+  });
+
+  it("does not fail a healthy run where posted showtimes all landed", () => {
+    expect(
+      shouldFailRun({
+        postFailed: false,
+        errors: [],
+        activeMovies: 1,
+        theatresPosted: 2,
+        theatresMatched: 2,
+        showtimesPosted: 313,
+        showtimesUpserted: 313,
+        dryRun: false,
+      })
+    ).toBe(false);
+  });
+
+  it("does not fail the posted>0/upserted=0 shape when showtimesUpserted is absent", () => {
+    expect(
+      shouldFailRun({
+        postFailed: false,
+        errors: [],
+        activeMovies: 1,
+        theatresPosted: 2,
+        theatresMatched: 2,
+        showtimesPosted: 313,
         dryRun: false,
       })
     ).toBe(false);

@@ -106,6 +106,41 @@ DASHBOARD (optional polish): the 4 Regal theatres are seeded and show in the app
 get showtimes until re-enabled. Consider an `enabled` flag on Theatre to label them
 "not yet monitored" so users aren't misled.
 
+## Empty-dashboard outage (2026-07-25/26) — THREE stacked bugs, root cause found
+Symptom: scraper green every 15min, 313 IMAX 70mm showtimes found, dashboard totally empty.
+1. DB never seeded (schema pushed, db:seed never run against Neon) -> ingest could not resolve
+   theatres. FIXED by lib/bootstrap.ts (PR #12, merged 31dbd40). Confirmed: theatresMatched=2.
+2. Bug #1 was MASKING bug #3. Once theatres resolved: theatresMatched=2, activeMovies=1,
+   313 posted, showtimesUpserted=0, errors=[] — silent, and the run still exited GREEN.
+3. ROOT CAUSE: the Movie row "The Odyssey" was created via the /movies UI using its DEFAULT
+   matcher template, which is INERT against lib/match.ts matchesMovie:
+     {"amc":{"attributeCodes":["IMAX70MM","70MM"],"titlePattern":""},"regal":{...}}
+   - no `movieIds` key      -> the id test cannot fire
+   - `titlePattern: ""`     -> title test is guarded by length>0, so it is SKIPPED
+   - `attributeCodes`       -> matchesMovie NEVER READS THIS. Dead weight in the template.
+   Every branch fails => matchesMovie returns false for every showtime, forever.
+   bootstrap's `movie.upsert({update:{}})` (chosen to not clobber operator edits) meant the
+   broken row was skipped on every single run — the repair had to be made explicit.
+FIXES: lib/match.ts isInertMatchers (encodes what matchesMovie ACTUALLY tests — notably that
+attributeCodes does NOT count); bootstrap repairs the seeded slug ONLY when provably inert
+(never touches other rows/fields or a working matcher set), reports `matchersRepaired`;
+/api/movies 400s on inert matchers instead of silently creating a dead movie; AddMovieForm
+drops attributeCodes, exposes movieIds, prefills titlePattern from the TMDB pick.
+EVIDENCE (FULL_SCAN dry run 30217415618): all 285 records are
+`title="The Odyssey" movieExternalId="76238" format="IMAX 70MM"|"70mm"` with real externalIds
+-> scraper was always correct; the bug was entirely app-side.
+
+## Scraper diagnostics/ops added this session
+- FULL_SCAN=1 (env + workflow_dispatch input, forced false on `schedule`): ignores stored
+  horizons, scans from today. REQUIRED for backfill — probeHorizon starts at storedHorizon-2,
+  so today..horizon-3 is NEVER rescraped once a horizon is recorded.
+- Dry run prints a 70mm breakdown: every distinct title/movieExternalId/format with counts +
+  2 full sample records per group (scraper/summarize70mm.ts, pure + tested).
+- concurrency: manual runs get `scrape-manual-{run_id}`; the shared `scrape` group with
+  cancel-in-progress had the */15 cron KILL a 10-min FULL_SCAN 8 min in (run 30216990559).
+- shouldFailRun: fails when theatresMatched>0 && activeMovies>0 && posted>0 && upserted===0.
+  This signature IS bug #3; its absence is why two runs reported success while storing nothing.
+
 ## Recent Changes
 - [2026-07-21] Change #3 BUILT: Regal-on-PC scraping + heartbeat alerts. scraper SCRAPE_CHAINS filter (AMC on Actions / REGAL on home PC; replaces hard Regal skip) + posts sourceHealth heartbeat. New SourceHealth model; lib/heartbeat.ts (recordHeartbeat + checkHeartbeats: 1 alert/outage + recovery, 45min stale); /api/ingest records heartbeat; /api/cron/heartbeat-check watchdog (called every run by AMC workflow); lib/email.ts sendAlertEmail (offline/blocked/recovered); scraper/REGAL-PC-SETUP.md (Windows Task Scheduler). Full next build + tsc PASS. NEEDS: `npx prisma db push` on Neon; Vercel ALERT_EMAIL/HEARTBEAT_STALE_MINUTES; PC setup. parseRegal.ts still UNVERIFIED (needs 1 real payload from PC).
 - [2026-07-21] Change #1 FIXED + VALIDATED: rewrote AMC scraper (parseAmc.ts DOM-based + scrapeAmc date-iteration/scroll). CI dry-run: Metreon 769 showtimes/52 70mm, CityWalk 1088/161 70mm over 14/14 dates; 70mm detection correct (Odyssey IMAX 70MM=true; RealD 3D/Laser/Standard=false). AMC NOT blocked; stays on Actions.

@@ -13,6 +13,13 @@ export interface ShouldFailRunInput {
   // Count of theatres ingest resolved by (chain, externalId). Absent on an
   // older deployed app version; treated as "unknown" and never fails.
   theatresMatched?: number;
+  // Total 70mm showtimes in the POST body (sum of t.showtimes.length across
+  // body.theatres).
+  showtimesPosted: number;
+  // How many showtimes the ingest response reported it upserted. Absent on an
+  // older deployed app version, or if the response was unparsable; treated as
+  // "unknown" and never fails.
+  showtimesUpserted?: number;
   dryRun: boolean;
 }
 
@@ -31,8 +38,12 @@ export interface ShouldFailRunInput {
 //  - the ingest response reported pipeline errors
 //  - there are zero active movies to match against (nothing CAN match)
 //  - theatres were posted but ingest resolved none of them (nothing CAN land)
+//  - theatres and movies resolved, showtimes were posted, but zero landed
+//    (nothing CAN explain that except a matcher/validation bug — a
+//    legitimate no-70mm night posts zero showtimes, so this cannot false-red)
 // Dry runs never fail. Fields absent from an older deployed app version
-// (activeMovies/theatresMatched) are treated as unknown, not failing.
+// (activeMovies/theatresMatched/showtimesUpserted) are treated as unknown,
+// not failing.
 export function shouldFailRun(input: ShouldFailRunInput): boolean {
   if (input.dryRun) return false;
   if (input.postFailed) return true;
@@ -46,6 +57,23 @@ export function shouldFailRun(input: ShouldFailRunInput): boolean {
     Number.isFinite(input.theatresMatched)
   ) {
     if (input.theatresMatched === 0) return true;
+  }
+  if (
+    typeof input.theatresMatched === "number" &&
+    Number.isFinite(input.theatresMatched) &&
+    typeof input.activeMovies === "number" &&
+    Number.isFinite(input.activeMovies) &&
+    typeof input.showtimesUpserted === "number" &&
+    Number.isFinite(input.showtimesUpserted)
+  ) {
+    if (
+      input.theatresMatched > 0 &&
+      input.activeMovies > 0 &&
+      input.showtimesPosted > 0 &&
+      input.showtimesUpserted === 0
+    ) {
+      return true;
+    }
   }
   return false;
 }

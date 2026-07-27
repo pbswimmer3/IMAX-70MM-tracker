@@ -4,6 +4,7 @@ import { normalizeAmcRecords, type RawAmcRecord } from "./parseAmc";
 import { parseRegalJson } from "./parseRegal";
 import { probeHorizon } from "./probe";
 import { shouldFailRun } from "./shouldFailRun";
+import { summarize70mm } from "./summarize70mm";
 import type { NormalizedShowtimeLite, ScrapeTheatre } from "./types";
 
 const CHROME_UA =
@@ -12,6 +13,11 @@ const CHROME_UA =
 const APP_URL = process.env.APP_URL ?? "";
 const CRON_SECRET = process.env.CRON_SECRET ?? "";
 const DRY_RUN = ["true", "1", "yes"].includes((process.env.DRY_RUN ?? "").toLowerCase());
+// Escape hatch: ignore each theatre's stored booking horizon and rescan from
+// today. Needed to diagnose a suspected match/ingest bug (a dry run
+// otherwise only reaches dates near the already-stored horizon, see
+// probe.ts) and to backfill once such a bug is fixed.
+const FULL_SCAN = process.env.FULL_SCAN === "1" || process.env.FULL_SCAN === "true";
 // Which chains this run scrapes. GitHub Actions runs "AMC" (datacenter IP is
 // fine for AMC); the home PC runs "REGAL" (needs a residential IP for Regal's
 // Cloudflare). Default AMC so the existing GitHub workflow is unchanged.
@@ -69,6 +75,12 @@ async function fetchTheatreConfig(): Promise<ScrapeTheatre[]> {
     );
     return THEATRES;
   }
+}
+
+// Quotes a present value (including an empty string, printed as `""`) so it
+// is visually distinguishable from a genuinely missing (undefined) value.
+function fmtField(v: string | undefined): string {
+  return v === undefined ? "<missing>" : `"${v}"`;
 }
 
 function looksLikeCloudflareChallenge(title: string, bodyText: string): boolean {
@@ -261,7 +273,8 @@ async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<
     let showtimes: NormalizedShowtimeLite[];
     let observedHorizon: string | null = null;
     if (theatre.chain === "AMC") {
-      const result = await scrapeAmc(page, theatre.showtimesUrl, theatre.horizonDate ?? null);
+      const storedHorizon = FULL_SCAN ? null : theatre.horizonDate ?? null;
+      const result = await scrapeAmc(page, theatre.showtimesUrl, storedHorizon);
       showtimes = result.showtimes;
       observedHorizon = result.observedHorizon;
     } else {
@@ -284,6 +297,9 @@ async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<
 }
 
 async function main() {
+  if (FULL_SCAN) {
+    console.log("[scrape] FULL_SCAN: ignoring stored horizons, scanning from today");
+  }
   const theatres = await fetchTheatreConfig();
   const browser = await chromium.launch({ headless: true });
 
@@ -334,6 +350,23 @@ async function main() {
       for (const s of showtimes.filter((s) => s.is70mm).slice(0, 4)) {
         console.log(`  70MM: ${s.movieTitle} (${s.movieExternalId}) | ${s.startsAt}`);
       }
+
+      const groups = summarize70mm(showtimes);
+      if (groups.length > 0) {
+        console.log(
+          `[dry-run] ${theatre.name}: 70mm breakdown (${count70} records, ${groups.length} distinct)`
+        );
+        for (const g of groups) {
+          console.log(
+            `    ${g.count}x  title=${fmtField(g.movieTitle)}  movieExternalId=${fmtField(g.movieExternalId)}  format=${fmtField(g.format)}`
+          );
+          for (const sample of g.samples) {
+            console.log(
+              `        sample: externalId=${fmtField(sample.externalId)}  startsAt=${fmtField(sample.startsAt)}  title=${fmtField(sample.movieTitle)}  movieExternalId=${fmtField(sample.movieExternalId)}  format=${fmtField(sample.format)}`
+            );
+          }
+        }
+      }
     }
 
     const allErrored = results.length > 0 && results.every((r) => r.error);
@@ -370,6 +403,7 @@ async function main() {
     ...(sourceHealth ? { sourceHealth } : {}),
   };
   const theatresPosted = body.theatres.length;
+  const showtimesPosted = body.theatres.reduce((sum, t) => sum + t.showtimes.length, 0);
 
   let ingestFailed = false;
   try {
@@ -391,6 +425,7 @@ async function main() {
         postFailed: true,
         errors: [],
         theatresPosted,
+        showtimesPosted,
         dryRun: DRY_RUN,
       });
     } else {
@@ -401,6 +436,8 @@ async function main() {
         typeof json?.theatresMatched === "number" ? json.theatresMatched : undefined;
       const activeMovies =
         typeof json?.activeMovies === "number" ? json.activeMovies : undefined;
+      const showtimesUpserted =
+        typeof json?.showtimesUpserted === "number" ? json.showtimesUpserted : undefined;
       const responseErrors: string[] = Array.isArray(json?.errors) ? json.errors : [];
 
       if (
@@ -410,13 +447,16 @@ async function main() {
           activeMovies,
           theatresPosted,
           theatresMatched,
+          showtimesPosted,
+          showtimesUpserted,
           dryRun: DRY_RUN,
         })
       ) {
         ingestFailed = true;
         console.error(
           `[scrape] FAILED: theatresPosted=${theatresPosted}, theatresMatched=${theatresMatched}, ` +
-            `activeMovies=${activeMovies}, errors=${JSON.stringify(responseErrors)}`
+            `activeMovies=${activeMovies}, showtimesPosted=${showtimesPosted}, ` +
+            `showtimesUpserted=${showtimesUpserted}, errors=${JSON.stringify(responseErrors)}`
         );
       }
     }
@@ -429,6 +469,7 @@ async function main() {
       postFailed: true,
       errors: [],
       theatresPosted,
+      showtimesPosted,
       dryRun: DRY_RUN,
     });
   }
