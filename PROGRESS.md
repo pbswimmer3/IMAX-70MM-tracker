@@ -106,7 +106,14 @@ DASHBOARD (optional polish): the 4 Regal theatres are seeded and show in the app
 get showtimes until re-enabled. Consider an `enabled` flag on Theatre to label them
 "not yet monitored" so users aren't misled.
 
-## Empty-dashboard outage (2026-07-25/26) — THREE stacked bugs, root cause found
+## Empty-dashboard outage (2026-07-25/26) — RESOLVED 2026-07-27, THREE stacked bugs
+RESOLUTION (backfill run 30226988746, main @bd98c06, FULL_SCAN=true DRY_RUN=false):
+  showtimesUpserted=277, newDrops=46, digestsSent=1, errors=[], theatresMatched=2.
+  83 (Metreon) + 194 (CityWalk) 70mm posted -> all 277 matched. 100% vs 0% for six days.
+  NOTE matchersRepaired=0 in the INGEST response: the repair had already fired earlier in the
+  same run, during that run's /api/scrape-config call (which also calls ensureBootstrapped).
+  Same pattern as theatresCreated=0 on 2026-07-25. Don't misread it as "the repair didn't run".
+
 Symptom: scraper green every 15min, 313 IMAX 70mm showtimes found, dashboard totally empty.
 1. DB never seeded (schema pushed, db:seed never run against Neon) -> ingest could not resolve
    theatres. FIXED by lib/bootstrap.ts (PR #12, merged 31dbd40). Confirmed: theatresMatched=2.
@@ -213,8 +220,18 @@ EVIDENCE (FULL_SCAN dry run 30217415618): all 285 records are
   showtimesUpserted in the hundreds; dashboard populates within ~15 min. If not, run goes RED.
 
 ## Last Session
-- Status: ALL 3 CHANGES BUILT on claude/session-tnklc6. #1 (AMC parser) validated live in CI. #2 (dashboard) built. #3 (Regal-on-PC + alerts) built, tsc+build pass (can't runtime-test w/o PC+DB migration).
-- USER TODO to go live: (1) merge claude/session-tnklc6 → main (activates AMC fix on the */15 schedule + deploys new routes). (2) `npx prisma db push` for SourceHealth table. (3) Vercel envs ALERT_EMAIL=pradbiswas@gmail.com, HEARTBEAT_STALE_MINUTES=45. (4) Set up PC per scraper/REGAL-PC-SETUP.md (SCRAPE_CHAINS=REGAL). (5) Verify parseRegal.ts vs a real payload from the PC.
-- Verified: 2026-07-21 — AMC CI dry-run detects Odyssey 70mm at both theatres; `next build` + `tsc --noEmit` clean (app+scraper).
+- Status: AMC PIPELINE IS LIVE END-TO-END. Empty-dashboard outage resolved (see section above).
+  PRs #12 (bootstrap) + #13 (matcher repair + FULL_SCAN + diagnostics) merged to main @bd98c06.
+  Backfill run 30226988746 stored 277 showtimes / 46 drops / 1 digest email.
+- OPEN / NOT DONE:
+  * Regal still deferred (4 theatres seeded but never scraped; SCRAPE_CHAINS=AMC on Actions).
+    parseRegal.ts still UNVERIFIED — needs one real payload from a residential IP.
+  * Vercel envs ALERT_EMAIL / HEARTBEAT_STALE_MINUTES: unconfirmed. heartbeat-check returns
+    {"checked":0} every run, i.e. no SourceHealth rows yet (expected while Regal is off).
+  * A future FULL_SCAN backfill is needed after ANY matcher/parser fix — probeHorizon resumes
+    from storedHorizon-2, so the current window never re-scrapes itself. Use the workflow's
+    full_scan input (manual runs now get their own concurrency group, so the cron can't kill them).
+- Verified: 2026-07-27 — 277/277 posted 70mm showtimes matched and stored; errors=[] ;
+  typecheck + 57 vitest tests + scraper tsc clean.
 - Exit: clean
-- Rollback: pre-change HEAD = 25a11ca (main). Changes are separate commits on claude/session-tnklc6.
+- Rollback: main @bd98c06. Pre-outage-fix main = 473298d.
