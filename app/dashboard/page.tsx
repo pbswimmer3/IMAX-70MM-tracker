@@ -2,7 +2,9 @@ import { redirect } from "next/navigation";
 import Link from "next/link";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { formatTheatreDay } from "@/lib/dates";
 import { SubscriptionToggle } from "./SubscriptionToggle";
+import { UpcomingShowtimes } from "./UpcomingShowtimes";
 
 export default async function DashboardPage() {
   const session = await auth();
@@ -42,15 +44,16 @@ export default async function DashboardPage() {
     ])
   );
 
-  const dayFmt = (d: Date) =>
-    new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  const dayFmt = (d: Date) => formatTheatreDay(d);
 
-  const showtimesByTheatre = new Map<string, typeof showtimes>();
-  for (const showtime of showtimes) {
-    const list = showtimesByTheatre.get(showtime.theatreId) ?? [];
-    list.push(showtime);
-    showtimesByTheatre.set(showtime.theatreId, list);
-  }
+  const upcomingRows = showtimes.map((showtime) => ({
+    id: showtime.id,
+    theatreId: showtime.theatreId,
+    movieTitle: showtime.movie.title,
+    startsAt: showtime.startsAt.toISOString(),
+    format: showtime.format,
+    bookingUrl: showtime.bookingUrl,
+  }));
 
   return (
     <div className="container">
@@ -101,45 +104,10 @@ export default async function DashboardPage() {
         ))}
       </div>
 
-      <div className="panel">
-        <h2>Upcoming 70mm showtimes</h2>
-        {theatres.map((theatre) => {
-          const theatreShowtimes = showtimesByTheatre.get(theatre.id);
-          if (!theatreShowtimes || theatreShowtimes.length === 0) return null;
-          return (
-            <div key={theatre.id} style={{ marginBottom: 20 }}>
-              <p style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--muted)" }}>
-                {theatre.name}
-              </p>
-              <table className="mono">
-                <tbody>
-                  {theatreShowtimes.map((showtime) => (
-                    <tr key={showtime.id}>
-                      <td>{showtime.movie.title}</td>
-                      <td>
-                        {new Date(showtime.startsAt).toLocaleString("en-US", {
-                          weekday: "short",
-                          month: "short",
-                          day: "numeric",
-                          hour: "numeric",
-                          minute: "2-digit",
-                        })}
-                      </td>
-                      <td>{showtime.format}</td>
-                      <td>
-                        {showtime.bookingUrl ? (
-                          <a href={showtime.bookingUrl}>tickets &rarr;</a>
-                        ) : null}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          );
-        })}
-        {showtimes.length === 0 && <p>No upcoming 70mm showtimes detected yet.</p>}
-      </div>
+      <UpcomingShowtimes
+        theatres={theatres.map((t) => ({ id: t.id, name: t.name }))}
+        showtimes={upcomingRows}
+      />
     </div>
   );
 }
