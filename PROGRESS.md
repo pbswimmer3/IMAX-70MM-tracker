@@ -149,6 +149,21 @@ EVIDENCE (FULL_SCAN dry run 30217415618): all 285 records are
   This signature IS bug #3; its absence is why two runs reported success while storing nothing.
 
 ## Recent Changes
+- [2026-07-27] Dashboard sort + timezone fix (branch claude/70mm-showtimes-sort-timezone-pa1l1z).
+    * BUG: showtimes rendered 7h ahead. `toLocaleString`/`toLocaleDateString` were called with no
+      `timeZone`, so the *runtime's* zone won — UTC on Vercel — turning a 7:00 PM PDT show into
+      2:00 AM the next day. Same defect in emails (lib/pipeline.ts formatShowtimeLabel) and in the
+      "on sale through" day label (off-by-one calendar day for evening shows).
+    * FIX: lib/dates.ts adds THEATRE_TIME_ZONE="America/Los_Angeles" (all 6 theatres are in CA) +
+      formatShowtime(instant, {withZone}) + formatTheatreDay(instant). All UI/email wall-clock
+      rendering routes through these; email labels carry the zone name ("... 7:00 PM PDT").
+    * FEATURE: app/dashboard/UpcomingShowtimes.tsx (NEW, client component) — "Upcoming 70mm
+      showtimes" panel extracted out of page.tsx with a date-sort toggle (asc soonest-first
+      default ⟷ desc furthest-out-first). Sorts globally then regroups; theatre grouping stays in
+      priority order (sort applies to dates only). page.tsx passes ISO strings, not Date objects.
+    * Zone-independence is covered by tests, not by the runner's TZ: test/dates.test.ts +5 asserts
+      exact PDT/PST output. Verified TZ=UTC and TZ=America/New_York → identical, 62/62 pass;
+      typecheck + next build clean.
 - [2026-07-21] Change #3 BUILT: Regal-on-PC scraping + heartbeat alerts. scraper SCRAPE_CHAINS filter (AMC on Actions / REGAL on home PC; replaces hard Regal skip) + posts sourceHealth heartbeat. New SourceHealth model; lib/heartbeat.ts (recordHeartbeat + checkHeartbeats: 1 alert/outage + recovery, 45min stale); /api/ingest records heartbeat; /api/cron/heartbeat-check watchdog (called every run by AMC workflow); lib/email.ts sendAlertEmail (offline/blocked/recovered); scraper/REGAL-PC-SETUP.md (Windows Task Scheduler). Full next build + tsc PASS. NEEDS: `npx prisma db push` on Neon; Vercel ALERT_EMAIL/HEARTBEAT_STALE_MINUTES; PC setup. parseRegal.ts still UNVERIFIED (needs 1 real payload from PC).
 - [2026-07-21] Change #1 FIXED + VALIDATED: rewrote AMC scraper (parseAmc.ts DOM-based + scrapeAmc date-iteration/scroll). CI dry-run: Metreon 769 showtimes/52 70mm, CityWalk 1088/161 70mm over 14/14 dates; 70mm detection correct (Odyssey IMAX 70MM=true; RealD 3D/Laser/Standard=false). AMC NOT blocked; stays on Actions.
 - [2026-07-21] dashboard/page.tsx: added per-movie 70mm availability line ("on sale through <maxDate> · last found <firstSeenAt>"); groupBy query. tsc clean. (Change #2) — BUILT
@@ -235,3 +250,13 @@ EVIDENCE (FULL_SCAN dry run 30217415618): all 285 records are
   typecheck + 57 vitest tests + scraper tsc clean.
 - Exit: clean
 - Rollback: main @bd98c06. Pre-outage-fix main = 473298d.
+
+## This Session (2026-07-27, branch claude/70mm-showtimes-sort-timezone-pa1l1z)
+- Done: dashboard date-sort toggle + Pacific-timezone rendering fix (see Recent Changes head entry).
+  Files: lib/dates.ts, lib/pipeline.ts, app/dashboard/page.tsx, app/dashboard/UpcomingShowtimes.tsx (new),
+  test/dates.test.ts.
+- Verified: typecheck clean, next build clean, 62/62 vitest under TZ=UTC and TZ=America/New_York.
+- NOTE: no schema/scraper change — stored startsAt instants were always correct; this was
+  display-only. No re-scrape or backfill needed.
+- Exit: clean
+- Rollback: main @bd98c06.

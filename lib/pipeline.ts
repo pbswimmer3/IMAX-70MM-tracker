@@ -2,7 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { matchesMovie } from "@/lib/match";
 import { sendDropEmail, sendReminderEmail, sendDropDigestEmail, type ShowtimeLink } from "@/lib/email";
 import { sign } from "@/lib/token";
-import { utcDateKey, newDropDates } from "@/lib/dates";
+import { utcDateKey, newDropDates, formatShowtime } from "@/lib/dates";
 import { buildDigests, type DropRow, type SubRow } from "@/lib/digest";
 import type { NormalizedShowtime } from "@/lib/adapters/types";
 
@@ -15,14 +15,10 @@ export interface TheatreIngest {
   observedHorizon?: string | null;
 }
 
+// Emailed labels carry the zone name — the recipient reads them outside any
+// page context, so "Sat, Aug 2, 7:00 PM PDT" beats a bare time.
 export function formatShowtimeLabel(startsAt: Date): string {
-  return startsAt.toLocaleString("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  return formatShowtime(startsAt, { withZone: true });
 }
 
 export async function loadShowtimeLinks(
