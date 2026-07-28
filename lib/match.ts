@@ -73,10 +73,16 @@ export function matchesMovie(
       ? (chainMatchers as MovieMatchers["amc"])?.movieIds
       : (chainMatchers as MovieMatchers["regal"])?.hoCodes;
 
+  // Case-insensitive: Regal returns MasterMovieCode uppercase ("HO00019072")
+  // while the seeded hoCodes are lowercase, so an exact includes() never fired
+  // for Regal and every match silently fell through to titlePattern.
+  const externalId = showtime.movieExternalId;
   if (
     Array.isArray(idList) &&
-    showtime.movieExternalId &&
-    idList.includes(showtime.movieExternalId)
+    externalId &&
+    idList.some(
+      (id) => typeof id === "string" && id.toLowerCase() === externalId.toLowerCase()
+    )
   ) {
     return true;
   }

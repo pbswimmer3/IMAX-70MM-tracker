@@ -1,7 +1,7 @@
 import { chromium, type Browser } from "playwright";
 import { THEATRES, regalDateRange, regalGetShowtimesPath, todayYmd } from "./theatres";
 import { normalizeAmcRecords, type RawAmcRecord } from "./parseAmc";
-import { parseRegalJson } from "./parseRegal";
+import { parseRegalJsonWithStats } from "./parseRegal";
 import { probeHorizon } from "./probe";
 import { shouldFailRun } from "./shouldFailRun";
 import { summarize70mm } from "./summarize70mm";
@@ -196,26 +196,37 @@ async function scrapeAmc(
   return { showtimes, observedHorizon: result.observedHorizon };
 }
 
+interface RegalDateFetch {
+  ok: boolean;
+  status: number;
+  json: unknown | null;
+}
+
 async function scrapeRegal(
   page: import("playwright").Page,
-  externalId: string
-): Promise<NormalizedShowtimeLite[]> {
+  externalId: string,
+  showtimesUrl: string
+): Promise<{ showtimes: NormalizedShowtimeLite[]; apiBlocked: boolean }> {
   const dates = regalDateRange(14);
   const paths = dates.map((d) => regalGetShowtimesPath(externalId, d));
 
   await page.waitForLoadState("domcontentloaded").catch(() => {});
-  let payloads: unknown[] = [];
+  let fetches: RegalDateFetch[] = [];
   try {
-    payloads = await page.evaluate(async (paths: string[]) => {
-      const out: unknown[] = [];
+    fetches = await page.evaluate(async (paths: string[]) => {
+      const out: { ok: boolean; status: number; json: unknown | null }[] = [];
       for (const path of paths) {
         try {
           const r = await fetch(path, { headers: { accept: "application/json" } });
-          if (r.ok && (r.headers.get("content-type") || "").includes("json")) {
-            out.push(await r.json());
-          }
+          const isJson = (r.headers.get("content-type") || "").includes("json");
+          out.push({
+            ok: r.ok,
+            status: r.status,
+            json: r.ok && isJson ? await r.json() : null,
+          });
         } catch {
-          // ignore individual date failures
+          // Network-level failure (no response at all): status 0 signals that.
+          out.push({ ok: false, status: 0, json: null });
         }
       }
       return out;
@@ -226,12 +237,34 @@ async function scrapeRegal(
     );
   }
 
-  const nonEmpty = payloads.filter((p) => p !== null && p !== undefined);
+  const payloads = fetches.filter((f) => f.json !== null && f.json !== undefined).map((f) => f.json);
+  const badFetches = fetches.filter((f) => f.json === null || f.json === undefined);
+  const badStatuses = Array.from(new Set(badFetches.map((f) => f.status))).sort();
   console.log(
-    `[scrape][regal] fetched ${payloads.length}/${dates.length} date payloads (${nonEmpty.length} non-empty)`
+    `[scrape][regal] fetched ${payloads.length}/${dates.length} date payloads OK+JSON` +
+      (badFetches.length > 0
+        ? `, ${badFetches.length} non-OK/non-JSON (statuses: ${badStatuses.join(", ")})`
+        : "")
   );
 
-  return parseRegalJson(payloads);
+  // A Cloudflare-blocked API can coexist with a healthy HTML page (the
+  // 2026-07-25 outage class): if we attempted at least one date and NONE
+  // yielded usable JSON, treat the API itself as blocked so the caller can
+  // mark the theatre BLOCKED instead of silently reporting a no-70mm night.
+  const apiBlocked = dates.length > 0 && payloads.length === 0;
+
+  const { showtimes, stats } = parseRegalJsonWithStats(payloads, externalId);
+  console.log(
+    `[scrape][regal] stats: performances=${stats.performances} kept=${stats.kept} noTime=${stats.noTime} ` +
+      `noId=${stats.noId} dupSameStart=${stats.dupSameStart} dupDifferentStart=${stats.dupDifferentStart}`
+  );
+
+  // getShowtimes carries no per-performance purchase URL, so link to the
+  // theatre's showtimes page (same fallback AMC uses).
+  return {
+    showtimes: showtimes.map((s) => ({ ...s, bookingUrl: showtimesUrl })),
+    apiBlocked,
+  };
 }
 
 async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<TheatreResult> {
@@ -278,7 +311,10 @@ async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<
       showtimes = result.showtimes;
       observedHorizon = result.observedHorizon;
     } else {
-      showtimes = await scrapeRegal(page, theatre.externalId);
+      const result = await scrapeRegal(page, theatre.externalId, theatre.showtimesUrl);
+      showtimes = result.showtimes;
+      // OR with the existing HTML-challenge check: either signal alone means blocked.
+      blocked = blocked || result.apiBlocked;
     }
 
     const count70 = showtimes.filter((s) => s.is70mm).length;
