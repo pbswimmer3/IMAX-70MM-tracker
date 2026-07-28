@@ -44,7 +44,8 @@ Redeploy so the new `/api/cron/heartbeat-check` route and env vars go live.
    npx playwright install chromium
    ```
 3. **Make a run script** `run-regal.cmd` in the `scraper` folder (fill in the
-   two secrets — same values as the app's `APP_URL` and `CRON_SECRET`):
+   two secrets — same values as the app's `APP_URL` and `CRON_SECRET`).
+   It holds secrets in plaintext and is **git-ignored** — never commit it:
    ```bat
    @echo off
    cd /d %~dp0
@@ -57,9 +58,11 @@ Redeploy so the new `/api/cron/heartbeat-check` route and env vars go live.
    set APP_URL=https://YOUR-APP.vercel.app
    set CRON_SECRET=YOUR_CRON_SECRET
    set DRY_RUN=false
+   echo ---- %DATE% %TIME% ---->> regal.log
    npx tsx scrape.ts >> regal.log 2>&1
    ```
-   Test it once by double-clicking; check `regal.log` for
+   `APP_URL` must have **no trailing slash** (the scraper appends
+   `/api/ingest`). Test it once by double-clicking; check `regal.log` for
    `PASS — N showtimes` lines and an `ingest response`. To eyeball results
    without posting, set `DRY_RUN=true` for a run.
 
@@ -68,18 +71,30 @@ Redeploy so the new `/api/cron/heartbeat-check` route and env vars go live.
    `run-regal.cmd` itself out of the repo (it holds your secrets) — it lives in
    `scraper/` and is covered by `.gitignore`.
 
-4. **Schedule it every 15 minutes** (Task Scheduler):
-   - Open **Task Scheduler → Create Task** (not "Basic Task").
-   - General: name it "Regal scraper"; check **Run whether user is logged on or
-     not** and **Run with highest privileges**.
-   - Triggers → New: **On a schedule → One time**, then check **Repeat task
-     every 15 minutes** for **Indefinitely**.
-   - Actions → New: **Start a program** → Program = the full path to
-     `run-regal.cmd`.
-   - Conditions: uncheck "Start the task only if the computer is on AC power"
-     (so it runs on your media PC regardless).
-   - Save (you'll be asked for your Windows password because of "run whether
-     logged on or not").
+4. **Schedule it every 15 minutes.** Either use the Task Scheduler GUI
+   (**Create Task**, not "Basic Task": trigger *One time* + *Repeat every 15
+   minutes* *Indefinitely*; action = full path to `run-regal.cmd`; uncheck
+   "Start the task only if the computer is on AC power"), or register it from
+   an **admin PowerShell** in one shot:
+   ```powershell
+   $cmd = "C:\path\to\IMAX-70MM-tracker\scraper\run-regal.cmd"
+   $action  = New-ScheduledTaskAction -Execute $cmd -WorkingDirectory (Split-Path $cmd)
+   $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).Date.AddMinutes(1) `
+                -RepetitionInterval (New-TimeSpan -Minutes 15) `
+                -RepetitionDuration ([TimeSpan]::MaxValue)
+   $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+                 -DontStopIfGoingOnBatteries -StartWhenAvailable `
+                 -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+   $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
+                  -LogonType S4U -RunLevel Highest
+   Register-ScheduledTask -TaskName "Regal scraper" -Action $action -Trigger $trigger `
+     -Settings $settings -Principal $principal -Force
+   ```
+   `-LogonType S4U` runs the task whether or not you are logged on **without
+   storing your password**, and with no console window popping up every 15
+   minutes. Run it as **your own user** (not SYSTEM): Playwright's Chromium is
+   installed under your profile (`%USERPROFILE%\AppData\Local\ms-playwright`)
+   and SYSTEM cannot see it.
 
 That's it — Regal showtimes will start flowing into the same dashboard as AMC.
 

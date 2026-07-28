@@ -150,6 +150,45 @@ EVIDENCE (FULL_SCAN dry run 30217415618): all 285 records are
   This signature IS bug #3; its absence is why two runs reported success while storing nothing.
 
 ## Recent Changes
+- [2026-07-29 ~02:30] REGAL RESTORED. The manual `git pull` recommended by #17 CAUSED an outage:
+  the PC had been running UNMERGED branch code that worked; pulling main replaced it with a
+  parser built on a GUESSED payload schema. Fixed on branch fix/regal-parser-restore.
+    * ROOT CAUSE: commit 449fad6 (branch claude/regal-live-from-home-pc) rewrote parseRegal.ts
+      against the REAL payload and was never merged. The home PC ran that branch in production
+      for weeks (1252 showtimes/run). main still carried the original guessed schema
+      (movies[].performances[]), which matches NOTHING. #17 told the user to `git pull` on the
+      PC; that pull overwrote 449fad6 with main -> 0 showtimes on every run from 01:16 onward.
+      NOTE #17's automatic `git pull` in run-regal.cmd was documented but never installed in the
+      actual local file, so the pull that broke it was the manual one.
+    * PROOF: regal.log has 372 `stats: performances=` lines (last at the 01:01 run); that string
+      exists ONLY in 449fad6, nowhere in main.
+    * FIX: cherry-picked 449fad6 onto main and integrated the two halves that had evolved
+      separately - main's horizon WALK (probeHorizon, one date per fetch) now DRIVES 449fad6's
+      real-payload parser (shows[].Film[].Performances[], 70mm from PerformanceAttributes).
+      Discarded 449fad6's fixed 14-day batch and main's guessed schema.
+    * SECOND BUG, exposed by the first fix: the in-page `fetch` inside page.evaluate had NO
+      timeout and page.evaluate has no default one, so a stalled Regal response hung the whole
+      sequential walk FOREVER (two runs killed after 20+ min having logged nothing). This was
+      latent: the broken parser returned 0, so the walk aborted after ~4 probes in 28s. Working
+      parser -> many more sequential requests -> Regal stalls them. Added a 3-state per-date
+      classification (OK_JSON / TRANSPORT_FAIL / timeout), an in-page AbortSignal.timeout, an
+      outer race on page.evaluate, a 6-min per-theatre wall-clock deadline that returns
+      observedHorizon=null (a truncated horizon must NEVER be persisted - it would permanently
+      cap future scans), 500ms request pacing, and a per-date progress log line.
+    * DATES PAST THE BOOKING HORIZON STALL, they do not 404. So every theatre pays
+      REGAL_OVERSHOOT+1 timeouts at the end of its walk. At the initial 20s that was 5.3 of the
+      run's 7.2 min. Measured 105 successful fetches: min 169ms / median 400ms / p95 629ms /
+      max 746ms -> timeouts cut to 6s (in-page) / 8s (evaluate guard), ~8x observed worst case.
+    * ALSO FIXED (review): TheatreCode compared as raw string would silently zero out theatre
+      "0347" if Regal echoed 347 (leading-zero normalization + theatreMismatch stat added);
+      PASS was logged even when apiBlocked; dedup was per-date so cross-date duplicate
+      PerformanceIds collapsed silently; apiBlocked conflated transport failure with an empty
+      booking window and could have emailed a false REGAL_PC offline alert.
+    * VERIFIED live 2026-07-29 02:24-02:31, all 4 Regal theatres PASS, The Odyssey IMAX 70mm:
+      Hacienda Crossings 1260 showtimes/94 70mm, Irvine Spectrum 1557/118, LA Live 1035/112,
+      Ontario Palace 1551/110. horizon=2026-08-23/24 (the ORIGINAL Aug-10 cap complaint is gone).
+    * OPEN: lib/adapters/regal.ts still holds the dead guessed-schema parser - delete it.
+      run-regal.cmd on the PC still has no auto-pull, so the PC will NOT pick this up on its own.
 - [2026-07-29] Regal horizon fix WASN'T RUNNING: home PC never pulled (branch claude/regal-dublin-imax-dates-wcggpb).
     * SYMPTOM after merging PR #16: Regal Dublin still capped, advancing exactly ONE day per day
       at local midnight (Aug 10 -> Aug 11 at 12am). That cadence is a today-relative window, NOT
@@ -204,6 +243,41 @@ EVIDENCE (FULL_SCAN dry run 30217415618): all 285 records are
     * TESTS 62→79. New test/parseRegal.test.ts (7) + test/scraperDates.test.ts (6) + 4 probe tests
       incl. a regression guard that a 14-day window misses a today+21 horizon. typecheck + scraper
       typecheck + next build clean; suite verified identical under TZ=UTC/New_York/LA/Tokyo.
+- [2026-07-28] REGAL IS LIVE from the home PC. parseRegal.ts rewritten against a REAL payload
+  (captured from this residential IP, theatre 1484) — the old guessed schema matched nothing:
+  it returned 0 showtimes from 14 non-empty payloads while Cloudflare was clearing fine.
+    * REAL getShowtimes shape (one request = one date):
+      { showDate, shows:[ { TheatreCode, AdvertiseShowDate, UtcDate, Film:[ { Title,
+        MasterMovieCode, Performances:[ { PerformanceId, PerformanceAttributes:string[],
+        CalendarShowTime, UtcShowTime, UnixTime, StopSales, Auditorium } ] } ] } ],
+        movies:[], attributes:[], futureShows:[], datesWithShows:[] }
+      NONE of the old guesses (movies|results|data / performances|sessions / start|dateTime /
+      experience|format) exist. `movies[]` DOES exist but is the film catalogue, and its
+      RelatedFormats lists every format the film plays in ANYWHERE — matching 70mm off it
+      would false-positive every theatre. 70mm lives ONLY in PerformanceAttributes
+      ("IMAX 70mm" / "70mm"), per performance.
+    * Mapping now: externalId=PerformanceId (unique per theatre; Showtime is
+      @@unique[theatreId,externalId]); startsAt=UtcShowTime (UnixTime epoch-ms fallback);
+      movieExternalId=MasterMovieCode; format=richest 70mm attribute ("IMAX 70mm" > "70mm");
+      showDate=AdvertiseShowDate sliced to YYYY-MM-DD (string slice, never Date()) —
+      this RESOLVES the old "Regal keys showDate off UTC" limitation.
+    * bookingUrl: getShowtimes carries NO per-performance purchase URL and the theatre page
+      renders showtime links client-side (initial DOM has none). scrape.ts scrapeRegal() now
+      stamps the theatre showtimesUrl on every record — same fallback AMC uses.
+    * LIVE RUN 2026-07-28 01:50 PT: theatresMatched=4, showtimesUpserted=280, newDrops=56,
+      digestsSent=3, heartbeatRecorded=true, errors=[]. Hacienda 63 / Irvine 73 / LA Live 72 /
+      Ontario 72, all "The Odyssey" MasterMovieCode HO00019072, format "IMAX 70mm".
+    * MATCHER CAVEAT (works today, fragile): seeded matchers.regal.hoCodes are LOWERCASE
+      ["ho00019076","ho00021807"] and do NOT contain the code Regal actually returns
+      (HO00019072). matchesMovie compares ids with a case-sensitive Array.includes, so the id
+      test NEVER fires for Regal — every match today is carried by titlePattern "odyssey".
+      Fix later either by adding HO00019072 to the seed or by making the id compare
+      case-insensitive in lib/match.ts (app-side, needs a deploy).
+    * TESTS: test/parseRegal.test.ts (15 cases: attribute detection, format preference,
+      TZ-independent showDate, PerformanceId dedupe, malformed payloads, UnixTime fallback).
+      77 vitest pass (was 62); scraper tsc clean.
+    * scraper/run-regal.cmd (git-ignored — holds APP_URL + CRON_SECRET in plaintext);
+      .gitignore updated. APP_URL must carry NO trailing slash (scrape.ts appends /api/ingest).
 - [2026-07-27] Dashboard sort + timezone fix (branch claude/70mm-showtimes-sort-timezone-pa1l1z).
     * BUG: showtimes rendered 7h ahead. `toLocaleString`/`toLocaleDateString` were called with no
       `timeZone`, so the *runtime's* zone won — UTC on Vercel — turning a 7:00 PM PDT show into
@@ -306,7 +380,61 @@ EVIDENCE (FULL_SCAN dry run 30217415618): all 285 records are
 - Exit: clean
 - Rollback: main @bd98c06. Pre-outage-fix main = 473298d.
 
-## This Session (2026-07-27, branch claude/70mm-showtimes-sort-timezone-pa1l1z)
+## This Session (2026-07-28, branch main — REGAL BROUGHT ONLINE)
+- Done: Regal scraping is LIVE from the home Windows PC (residential IP). See the
+  2026-07-28 Recent Changes entry for the payload schema + mapping.
+  Files: scraper/parseRegal.ts (rewritten), scraper/scrape.ts (scrapeRegal takes showtimesUrl,
+  stamps bookingUrl), scraper/REGAL-PC-SETUP.md, .gitignore, test/parseRegal.test.ts (new),
+  PROGRESS.md. Untracked+ignored: scraper/run-regal.cmd, scraper/regal.log.
+- PC state (this machine): node v22.18.0; scraper/node_modules installed; Playwright chromium
+  installed under %USERPROFILE%\AppData\Local\ms-playwright.
+- Task Scheduler task "Regal scraper": runs scraper\run-regal.cmd every 15 min indefinitely,
+  principal pradb / LogonType **Interactive** / RunLevel Limited, Hidden, StartWhenAvailable,
+  30-min limit, IgnoreNew. Verified: LastTaskResult=0, unattended run posted 280 upserted /
+  newDrops=0 (idempotent, no duplicate emails) / heartbeatRecorded=true.
+  CAVEAT: Interactive means it runs ONLY WHILE pradb IS LOGGED ON (the shell was not elevated,
+  so S4U/"run whether logged on or not" was rejected with Access denied). To make it survive
+  a logoff, re-register the same task from an ELEVATED PowerShell using the S4U principal in
+  REGAL-PC-SETUP.md step 4. Also set Power > Sleep = Never.
+- Verified: 77/77 vitest, scraper tsc clean, two live ingest runs errors=[].
+- HARDENING (from the reviewer pass, all pre-push):
+  * startsAtIso: a zoneless UtcShowTime was parsed as HOST-LOCAL (spec behavior) = silent 7h
+    shift on this PT box. Appends "Z" when no zone designator is present. UnixTime below 1e11
+    is treated as epoch SECONDS (a seconds value otherwise makes a valid-looking 1970 date
+    that passes the NaN guard).
+  * parseRegalJson now returns EVERY performance with is70mm set, not 70mm-only — parity with
+    parseAmc. Before, the log always read "N showtimes, N are 70mm", so a broken parser was
+    indistinguishable from a 70mm-less night. scrape.ts still filters is70mm at POST time.
+  * parseRegalJsonWithStats + RegalParseStats: logs performances/kept/noTime/noId/
+    dupSameStart/dupDifferentStart. dupDifferentStart>0 would mean PerformanceId is NOT unique
+    per theatre and is unsafe as externalId. Measured 0 at all 4 theatres.
+  * expectedTheatreCode filter: getShowtimes?theatres= accepts a LIST while the caller
+    attributes every record to the one theatre it asked for (and stamps its bookingUrl).
+  * scrapeRegal returns {showtimes, apiBlocked}: the in-page fetch used to discard HTTP status,
+    so a Cloudflare 403 on /api/getShowtimes with a healthy HTML page produced payloads=[],
+    0 posted, shouldFailRun green, sourceHealth "not blocked" — the 2026-07-25 silent-zero
+    class all over again. Now ORs into TheatreResult.blocked so the watchdog can see it.
+  * VERIFIED post-hardening dry run: 70mm counts IDENTICAL (63/73/72/72), stats all-zero drops,
+    non-70mm baseline now visible (RPX/ViP/4DX/Standard is70mm=false).
+- ALSO FIXED this session: the Regal hoCode matcher was dead. lib/match.ts compared ids with a
+  case-sensitive Array.includes while Regal returns MasterMovieCode UPPERCASE and the seed holds
+  lowercase — so the id branch never fired and every Regal match rode on titlePattern "odyssey"
+  alone. matchesMovie now compares ids case-insensitively (and skips non-string entries);
+  lib/theatres.ts ODYSSEY_MOVIE.regal.hoCodes is now ["ho00019072"] ONLY — the code Regal
+  actually returns. ho00019076/ho00021807 were never-verified guesses and were REMOVED: with the
+  id branch now live, and matchesMovie returning true on a bare id hit with no title cross-check,
+  a wrong code would attribute another film's 70mm shows to The Odyssey and fire a drop email.
+  4 new cases in test/match.test.ts. NOTE the live DB Movie row is NOT updated by any of this
+  (bootstrap upserts with update:{} and only repairs provably-inert matchers, and prod's row was
+  already repaired to non-inert on 2026-07-27) — prod keeps matching by titlePattern until the
+  row is edited by hand. Harmless today; the code fix only takes effect for a fresh DB.
+- OPEN: (1) lib/match.ts + lib/theatres.ts are app-side — they need a Vercel deploy to take
+  effect in prod. (2) AMC on GitHub Actions is untouched and unaffected.
+- Exit: clean
+- Rollback: main @180a233 (all Regal work is uncommitted; `git checkout -- scraper test .gitignore
+  PROGRESS.md` reverts, then Unregister-ScheduledTask -TaskName "Regal scraper").
+
+## Previous Session (2026-07-27, branch claude/70mm-showtimes-sort-timezone-pa1l1z)
 - Done: dashboard date-sort toggle + Pacific-timezone rendering fix (see Recent Changes head entry).
   Files: lib/dates.ts, lib/pipeline.ts, app/dashboard/page.tsx, app/dashboard/UpcomingShowtimes.tsx (new),
   test/dates.test.ts.

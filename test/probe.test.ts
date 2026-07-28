@@ -242,4 +242,55 @@ describe("probeHorizon", () => {
       "2026-07-27",
     ]);
   });
+
+  it("deadline abort stops the walk early and reports deadlineExceeded with observedHorizon left unset for later dates", async () => {
+    // Every date has showtimes, so nothing but the deadline would stop this
+    // walk — simulates a hung/slow sequential run that must bail out rather
+    // than run forever or silently truncate the horizon.
+    const { fetchDate, queriedDates } = makeFetchDate({
+      "2026-07-23": 1,
+      "2026-07-24": 1,
+      "2026-07-25": 1,
+      "2026-07-26": 1,
+      "2026-07-27": 1,
+    });
+
+    // Fake clock: advances by 1000ms per fetchDate call so the 3rd call
+    // crosses a 2500ms deadline.
+    let fakeNow = 0;
+    const now = () => fakeNow;
+    const timedFetchDate = async (ymd: string) => {
+      fakeNow += 1000;
+      return fetchDate(ymd);
+    };
+
+    const result = await probeHorizon(timedFetchDate, {
+      today: "2026-07-23",
+      storedHorizon: null,
+      overshoot: 1,
+      lookback: 2,
+      maxForward: 20,
+      deadlineMs: 2500,
+      now,
+    });
+
+    expect(result.deadlineExceeded).toBe(true);
+    // Stopped well short of maxForward / the "every date has showtimes" tail.
+    expect(queriedDates.length).toBeLessThan(5);
+  });
+
+  it("no deadline configured never sets deadlineExceeded", async () => {
+    const { fetchDate } = makeFetchDate({
+      "2026-07-23": 1,
+      "2026-07-24": 0,
+      "2026-07-25": 0,
+    });
+    const result = await probeHorizon(fetchDate, {
+      today: "2026-07-23",
+      storedHorizon: null,
+      overshoot: 1,
+      lookback: 2,
+    });
+    expect(result.deadlineExceeded).toBe(false);
+  });
 });

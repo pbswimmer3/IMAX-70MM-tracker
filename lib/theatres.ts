@@ -96,7 +96,13 @@ export const ODYSSEY_MOVIE: MovieSeed = {
       titlePattern: "odyssey",
     },
     regal: {
-      hoCodes: ["ho00019076", "ho00021807"],
+      // Confirmed live 2026-07-28: Regal returns MasterMovieCode HO00019072 for
+      // the 70mm presentation at all 4 theatres. Compared case-insensitively.
+      // lib/match.ts's id branch is a bare id hit with no title cross-check, so
+      // an unconfirmed code here would misattribute another film's 70mm shows.
+      // ho00019076/ho00021807 were unverified guesses (see old PROGRESS.md) —
+      // only re-add them if confirmed against a real payload.
+      hoCodes: ["ho00019072"],
       titlePattern: "odyssey",
     },
   },

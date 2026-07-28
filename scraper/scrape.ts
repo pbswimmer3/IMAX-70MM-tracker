@@ -1,10 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium, type Browser } from "playwright";
 import { THEATRES, regalGetShowtimesPath, todayYmd } from "./theatres";
 import { normalizeAmcRecords, type RawAmcRecord } from "./parseAmc";
-import { parseRegalPayload } from "./parseRegal";
+import { parseRegalDatePayload, type RegalParseStats } from "./parseRegal";
 import { probeHorizon } from "./probe";
 import { shouldFailRun } from "./shouldFailRun";
 import { summarize70mm } from "./summarize70mm";
@@ -205,33 +205,174 @@ async function scrapeAmc(
 // dark day (or a 2-3 day gap between engagements) must not truncate the horizon.
 const REGAL_OVERSHOOT = 3;
 
+// In-page fetch timeout. A stalled Regal response used to hang the in-page
+// `fetch` (and therefore the whole sequential horizon walk) forever — this
+// bounds a single date's request.
+//
+// Sized from a measured full 4-theatre walk (2026-07-29, 105 successful date
+// fetches): min 169ms, median 400ms, p95 629ms, max 746ms. 6s is ~8x the
+// observed worst case. This is deliberately not generous: dates PAST the
+// booking horizon do not 404, they stall, so every theatre pays
+// REGAL_OVERSHOOT+1 timeouts at the end of its walk. At the original 20s that
+// overshoot was 5.3 of the run's 7.2 minutes — the timeout value, not the
+// scraping, was the dominant cost of a run.
+export const REGAL_FETCH_TIMEOUT_MS = 6000;
+// Outer guard on the page.evaluate call itself. A hung V8 context inside the
+// page can outlive the in-page AbortSignal.timeout above, so the evaluate
+// call is separately raced against this timer. Kept above
+// REGAL_FETCH_TIMEOUT_MS so the in-page abort is what normally fires (it
+// reports the more precise reason); this is the backstop.
+export const REGAL_EVALUATE_TIMEOUT_MS = 8000;
+// Wall-clock budget for ONE theatre's entire date-by-date walk. Exceeding it
+// aborts the walk (see the "DEADLINE ABORT" log line) instead of returning a
+// truncated observedHorizon, which would otherwise get persisted to the DB
+// and permanently cap future scans wherever the walk happened to stall.
+export const REGAL_WALK_DEADLINE_MS = 6 * 60 * 1000;
+// Delay between sequential date requests to the same theatre. The walk now
+// issues far more sequential requests to Regal from a single residential IP
+// than this scraper has ever made in production.
+export const REGAL_REQUEST_DELAY_MS = 500;
+
+type RegalFetchOutcome = { ok: true; json: unknown } | { ok: false; reason: string };
+
+// Blocked means the API itself is unreachable, not merely quiet: derive it
+// from transport failures only, never from "parsed fine but zero shows",
+// so a theatre with a legitimately dark week is never reported BLOCKED (and
+// never trips the REGAL_PC offline heartbeat / false outage alert).
+export function deriveRegalApiBlocked(datesAttempted: number, datesTransportFail: number): boolean {
+  return datesAttempted > 0 && datesTransportFail === datesAttempted;
+}
+
+// A deadline-aborted walk must never report a truncated horizon: returning
+// null here is what stops scrape.ts from writing a wrong, permanently-capping
+// booking horizon back to the DB.
+export function resolveRegalObservedHorizon(
+  observedHorizon: string | null,
+  deadlineExceeded: boolean
+): string | null {
+  return deadlineExceeded ? null : observedHorizon;
+}
+
 async function scrapeRegal(
   page: import("playwright").Page,
   externalId: string,
+  showtimesUrl: string,
   storedHorizon: string | null
-): Promise<{ showtimes: NormalizedShowtimeLite[]; observedHorizon: string | null }> {
+): Promise<{
+  showtimes: NormalizedShowtimeLite[];
+  observedHorizon: string | null;
+  apiBlocked: boolean;
+}> {
   // Fetch one date at a time so probeHorizon can walk forward to the ACTUAL end
   // of Regal's booking window. This previously used a hard-coded 14-day range,
   // which silently capped every Regal theatre at today+13 — showtimes on sale
   // beyond that were never requested, so they never appeared in the dashboard.
   // Stays an in-page same-origin fetch: that's what carries the Cloudflare
   // clearance cookie earned by the theatre-page load.
+  let datesAttempted = 0;
+  let datesOkJson = 0;
+  let datesTransportFail = 0;
+  // Hoisted to the whole theatre's walk (not per date) so a PerformanceId that
+  // reappears on a later date — Regal echoes some performances on adjacent
+  // dates near midnight boundaries — is deduped across the whole walk instead
+  // of colliding silently (last write wins) inside a single date's payload.
+  const seen = new Map<string, string>();
+  const stats: RegalParseStats = {
+    performances: 0,
+    kept: 0,
+    noTime: 0,
+    noId: 0,
+    dupSameStart: 0,
+    dupDifferentStart: 0,
+    theatreMismatch: 0,
+  };
+
+  // Runs in the page: one same-origin fetch bounded by both an in-page abort
+  // (fires first, in the common case) and never throws — every failure mode
+  // (bad status, non-JSON, bad JSON body, network error) resolves to
+  // { ok: false, reason }, so the caller can tell TRANSPORT_FAIL apart from a
+  // legitimately empty OK_JSON date.
+  const fetchJsonForDate = (path: string): Promise<RegalFetchOutcome> => {
+    const evaluatePromise: Promise<RegalFetchOutcome> = page
+      .evaluate(async (p: string) => {
+        try {
+          const r = await fetch(p, {
+            headers: { accept: "application/json" },
+            signal: AbortSignal.timeout(15000),
+          });
+          if (!r.ok) return { ok: false as const, reason: `http ${r.status}` };
+          if (!(r.headers.get("content-type") || "").includes("json")) {
+            return { ok: false as const, reason: "non-json content-type" };
+          }
+          try {
+            return { ok: true as const, json: await r.json() };
+          } catch {
+            return { ok: false as const, reason: "invalid json body" };
+          }
+        } catch (err) {
+          return {
+            ok: false as const,
+            reason: err instanceof Error ? err.message : "in-page fetch failed",
+          };
+        }
+      }, path)
+      .catch(
+        (err): RegalFetchOutcome => ({
+          ok: false,
+          reason: err instanceof Error ? err.message : "page.evaluate rejected",
+        })
+      );
+
+    const timeoutPromise: Promise<RegalFetchOutcome> = new Promise((resolve) => {
+      setTimeout(
+        () =>
+          resolve({
+            ok: false,
+            reason: `page.evaluate timed out (${REGAL_EVALUATE_TIMEOUT_MS}ms)`,
+          }),
+        REGAL_EVALUATE_TIMEOUT_MS
+      );
+    });
+
+    // The evaluate promise is never allowed to reject (caught above), so it's
+    // safe to let it keep running in the background after the timeout wins —
+    // no unhandled rejection when/if it eventually settles.
+    return Promise.race([evaluatePromise, timeoutPromise]);
+  };
+
   const fetchDate = async (ymd: string): Promise<NormalizedShowtimeLite[]> => {
     const path = regalGetShowtimesPath(externalId, ymd);
-    try {
-      const payload = await page.evaluate(async (p: string) => {
-        const r = await fetch(p, { headers: { accept: "application/json" } });
-        if (!r.ok || !(r.headers.get("content-type") || "").includes("json")) return null;
-        return await r.json();
-      }, path);
-      if (payload === null || payload === undefined) return [];
-      return parseRegalPayload(payload, ymd);
-    } catch (err) {
-      console.log(
-        `[scrape][regal] ${ymd} fetch failed: ${err instanceof Error ? err.message : err}`
-      );
+    datesAttempted++;
+    // Polite pacing: don't delay the first request, only between requests.
+    if (datesAttempted > 1) {
+      await new Promise((resolve) => setTimeout(resolve, REGAL_REQUEST_DELAY_MS));
+    }
+
+    const startedAt = Date.now();
+    const outcome = await fetchJsonForDate(path);
+    const elapsedMs = Date.now() - startedAt;
+
+    if (!outcome.ok) {
+      datesTransportFail++;
+      console.log(`[scrape][regal] ${ymd}: TRANSPORT_FAIL (${outcome.reason}) in ${elapsedMs}ms`);
       return [];
     }
+
+    datesOkJson++;
+    const { showtimes, stats: dateStats } = parseRegalDatePayload(outcome.json, externalId, ymd, seen);
+    stats.performances += dateStats.performances;
+    stats.kept += dateStats.kept;
+    stats.noTime += dateStats.noTime;
+    stats.noId += dateStats.noId;
+    stats.dupSameStart += dateStats.dupSameStart;
+    stats.dupDifferentStart += dateStats.dupDifferentStart;
+    stats.theatreMismatch += dateStats.theatreMismatch;
+
+    const count70 = showtimes.filter((s) => s.is70mm).length;
+    console.log(
+      `[scrape][regal] ${ymd}: ${showtimes.length} showtimes (${count70} 70mm) in ${elapsedMs}ms`
+    );
+    return showtimes;
   };
 
   await page.waitForLoadState("domcontentloaded").catch(() => {});
@@ -240,18 +381,49 @@ async function scrapeRegal(
     today: todayYmd(),
     storedHorizon,
     overshoot: REGAL_OVERSHOOT,
-    // showDate is already stamped by parseRegalPayload; don't let the default
-    // tag write AMC's queryDate onto a normalized record.
+    // showDate is already stamped by parseRegalDatePayload (preferring the
+    // payload's own advertised date, falling back to the queried date); don't
+    // let the default tag write AMC's queryDate onto a normalized record.
     tag: () => {},
+    deadlineMs: REGAL_WALK_DEADLINE_MS,
   });
+
+  if (result.deadlineExceeded) {
+    console.log(
+      `[scrape][regal] DEADLINE ABORT: exceeded ${REGAL_WALK_DEADLINE_MS}ms wall-clock budget ` +
+        `after ${result.datesProbed.length} dates (${datesTransportFail} transport failures) — ` +
+        `refusing to persist a truncated horizon`
+    );
+  }
+  const observedHorizon = resolveRegalObservedHorizon(result.observedHorizon, result.deadlineExceeded);
+
+  // A Cloudflare-blocked API can coexist with a healthy HTML page (the
+  // 2026-07-25 outage class): if every attempted date failed at the
+  // transport layer, treat the API itself as blocked so the caller can mark
+  // the theatre BLOCKED instead of silently reporting a no-70mm night.
+  const apiBlocked = deriveRegalApiBlocked(datesAttempted, datesTransportFail);
+
+  console.log(
+    `[scrape][regal] stats: performances=${stats.performances} kept=${stats.kept} noTime=${stats.noTime} ` +
+      `noId=${stats.noId} dupSameStart=${stats.dupSameStart} dupDifferentStart=${stats.dupDifferentStart} ` +
+      `theatreMismatch=${stats.theatreMismatch}`
+  );
 
   const count70 = result.records.filter((s) => s.is70mm).length;
   console.log(
     `[scrape][regal] ${result.records.length} showtimes (${count70} are 70mm) over ` +
-      `${result.datesWithShowtimes}/${result.datesProbed.length} dates with data (horizon=${result.observedHorizon})`
+      `${result.datesWithShowtimes}/${result.datesProbed.length} dates with data ` +
+      `(datesAttempted=${datesAttempted} okJson=${datesOkJson} transportFail=${datesTransportFail}, ` +
+      `horizon=${observedHorizon})`
   );
 
-  return { showtimes: result.records, observedHorizon: result.observedHorizon };
+  // getShowtimes carries no per-performance purchase URL, so link to the
+  // theatre's showtimes page (same fallback AMC uses).
+  return {
+    showtimes: result.records.map((s) => ({ ...s, bookingUrl: showtimesUrl })),
+    observedHorizon,
+    apiBlocked,
+  };
 }
 
 async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<TheatreResult> {
@@ -291,16 +463,32 @@ async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<
     }
 
     const storedHorizon = FULL_SCAN ? null : theatre.horizonDate ?? null;
-    const result =
-      theatre.chain === "AMC"
-        ? await scrapeAmc(page, theatre.showtimesUrl, storedHorizon)
-        : await scrapeRegal(page, theatre.externalId, storedHorizon);
-    const showtimes = result.showtimes;
-    const observedHorizon = result.observedHorizon;
+    let showtimes: NormalizedShowtimeLite[];
+    let observedHorizon: string | null;
+    if (theatre.chain === "AMC") {
+      const result = await scrapeAmc(page, theatre.showtimesUrl, storedHorizon);
+      showtimes = result.showtimes;
+      observedHorizon = result.observedHorizon;
+    } else {
+      const result = await scrapeRegal(
+        page,
+        theatre.externalId,
+        theatre.showtimesUrl,
+        storedHorizon
+      );
+      showtimes = result.showtimes;
+      observedHorizon = result.observedHorizon;
+      // OR with the existing HTML-challenge check: either signal alone means blocked.
+      blocked = blocked || result.apiBlocked;
+    }
 
     const count70 = showtimes.filter((s) => s.is70mm).length;
+    // Gate the PASS label on `blocked` (set above, possibly by Regal's
+    // apiBlocked) — an API-blocked theatre must never log as a healthy empty
+    // night.
+    const label = blocked ? "BLOCKED" : "PASS";
     console.log(
-      `[scrape][${theatre.chain}] ${theatre.name}: PASS — ${showtimes.length} showtimes, ${count70} are 70mm`
+      `[scrape][${theatre.chain}] ${theatre.name}: ${label} — ${showtimes.length} showtimes, ${count70} are 70mm`
     );
 
     return { theatre, showtimes, blocked, observedHorizon };
@@ -524,7 +712,16 @@ async function main() {
   process.exit(allErrored || ingestFailed ? 1 : 0);
 }
 
-main().catch((err) => {
-  console.error("[scrape] fatal:", err instanceof Error ? err.message : err);
-  process.exit(1);
-});
+// Only run main() when this file is executed directly (the production
+// entrypoint), not when it's imported — e.g. by tests importing the pure
+// helpers above — which would otherwise launch a real browser as a side
+// effect of import.
+const isMainModule =
+  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isMainModule) {
+  main().catch((err) => {
+    console.error("[scrape] fatal:", err instanceof Error ? err.message : err);
+    process.exit(1);
+  });
+}

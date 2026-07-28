@@ -9,6 +9,13 @@ export interface ProbeOptions {
   // Stamps the probed date onto each record. Defaults to `rec.queryDate = ymd`
   // (what AMC's RawAmcRecord uses); Regal records carry it as `showDate`.
   tag?: (rec: any, ymd: string) => void;
+  // Overall wall-clock budget (ms) for the whole walk. If exceeded, the walk
+  // stops early and ProbeResult.deadlineExceeded is set so the caller can
+  // refuse to persist a possibly-truncated observedHorizon. Undefined (the
+  // default) means no deadline is enforced.
+  deadlineMs?: number;
+  // Clock source, overridable for tests. Defaults to Date.now.
+  now?: () => number;
 }
 
 export interface ProbeResult<T> {
@@ -16,6 +23,9 @@ export interface ProbeResult<T> {
   observedHorizon: string | null; // last date with >=1 showtime, else null
   datesWithShowtimes: number;
   datesProbed: string[];
+  // True if the walk stopped early because it exceeded opts.deadlineMs,
+  // rather than because it reached maxForward or its overshoot limit.
+  deadlineExceeded: boolean;
 }
 
 // fetchDate(ymd) returns ALL showtime records on that local date (any format); [] = empty date.
@@ -27,6 +37,9 @@ export async function probeHorizon<T>(
   const overshoot = opts.overshoot ?? 1;
   const maxForward = opts.maxForward ?? 60;
   const tag = opts.tag ?? ((rec: any, ymd: string) => (rec.queryDate = ymd));
+  const now = opts.now ?? Date.now;
+  const deadlineMs = opts.deadlineMs;
+  const startedAt = now();
 
   const lookbackStart = opts.storedHorizon ? addDaysYmd(opts.storedHorizon, -lookback) : opts.today;
   const start = opts.today > lookbackStart ? opts.today : lookbackStart;
@@ -36,9 +49,14 @@ export async function probeHorizon<T>(
   let observedHorizon: string | null = null;
   let datesWithShowtimes = 0;
   let emptyStreak = 0;
+  let deadlineExceeded = false;
 
   let ymd = start;
   for (let i = 0; i < maxForward; i++) {
+    if (deadlineMs !== undefined && now() - startedAt > deadlineMs) {
+      deadlineExceeded = true;
+      break;
+    }
     const recs = await fetchDate(ymd);
     for (const rec of recs) {
       tag(rec, ymd);
@@ -56,5 +74,5 @@ export async function probeHorizon<T>(
     ymd = addDaysYmd(ymd, 1);
   }
 
-  return { records, observedHorizon, datesWithShowtimes, datesProbed };
+  return { records, observedHorizon, datesWithShowtimes, datesProbed, deadlineExceeded };
 }
