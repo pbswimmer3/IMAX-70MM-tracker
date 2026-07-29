@@ -48,6 +48,11 @@ Redeploy so the new `/api/cron/heartbeat-check` route and env vars go live.
    ```bat
    @echo off
    cd /d %~dp0
+   rem Pull the latest code before every run. WITHOUT THIS the PC keeps running
+   rem whatever was cloned at setup time, and merged fixes never take effect —
+   rem see "The PC is running stale code" under Troubleshooting.
+   git -C .. pull --ff-only >> regal.log 2>&1
+   npm install --no-audit --no-fund >> regal.log 2>&1
    set SCRAPE_CHAINS=REGAL
    set APP_URL=https://YOUR-APP.vercel.app
    set CRON_SECRET=YOUR_CRON_SECRET
@@ -57,6 +62,11 @@ Redeploy so the new `/api/cron/heartbeat-check` route and env vars go live.
    Test it once by double-clicking; check `regal.log` for
    `PASS — N showtimes` lines and an `ingest response`. To eyeball results
    without posting, set `DRY_RUN=true` for a run.
+
+   `git pull --ff-only` never rewrites local work: if you've edited files in the
+   clone it stops with an error and the run proceeds on the current code. Keep
+   `run-regal.cmd` itself out of the repo (it holds your secrets) — it lives in
+   `scraper/` and is covered by `.gitignore`.
 
 4. **Schedule it every 15 minutes** (Task Scheduler):
    - Open **Task Scheduler → Create Task** (not "Basic Task").
@@ -87,6 +97,33 @@ detect outages. It sends **one email per outage** plus a **recovery email**:
 - **"Regal feed recovered"** — real Regal data is arriving again.
 
 Each fires once on the transition (no repeat spam), to `ALERT_EMAIL`.
+
+## Troubleshooting
+
+### The PC is running stale code
+
+Every run logs the commit it is executing, as the first line:
+
+```
+[scrape] revision=24aadd6 chains=REGAL today=2026-07-29 dryRun=false fullScan=false
+```
+
+Compare that SHA against `main` on GitHub. If it is behind, the PC is running
+old code and **no merged fix is in effect** — this is invisible in every other
+log line, because a stale scraper still reports `PASS` and still posts data.
+
+The signature that first exposed it: Regal's horizon advanced exactly one day
+per day at local midnight, capped at today+13, because the PC still had the
+pre-fix `regalDateRange(14)` window long after the horizon-walk fix was merged.
+
+Fix: `git -C path\to\IMAX-70MM-tracker pull --ff-only`, then confirm the
+revision line changes on the next run. The `git pull` line in `run-regal.cmd`
+above prevents a recurrence.
+
+`revision=unknown` means the folder isn't a git checkout (downloaded as a ZIP?)
+or `git` isn't on PATH — re-clone per step 2 so updates can flow.
+`revision=<sha>-dirty` means the clone has uncommitted local edits, which is
+also what blocks `--ff-only` from pulling.
 
 ## Notes / caveats
 

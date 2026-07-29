@@ -7,5 +7,9 @@ node_modules/
 .vercel
 *.log
 
+# Home-PC Regal runner: holds APP_URL + CRON_SECRET in plaintext, and lives
+# inside the clone that now pulls on every run (scraper/REGAL-PC-SETUP.md).
+run-regal.cmd
+
 # Transient planning artifact (see CLAUDE.md: delete after execution)
 plan.md
