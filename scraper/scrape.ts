@@ -1,3 +1,6 @@
+import { execFileSync } from "node:child_process";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { chromium, type Browser } from "playwright";
 import { THEATRES, regalGetShowtimesPath, todayYmd } from "./theatres";
 import { normalizeAmcRecords, type RawAmcRecord } from "./parseAmc";
@@ -310,7 +313,36 @@ async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<
   }
 }
 
+// Which commit this process is actually running. The Regal scraper runs from a
+// clone on a home PC that nothing auto-updates, so a merged fix can sit unused
+// indefinitely with the logs looking completely healthy — that is exactly how
+// the 14-day Regal horizon cap survived its own fix. Print the revision every
+// run so a stale checkout is visible in regal.log rather than silent.
+function scraperRevision(): string {
+  // This package is "type": "module", so __dirname/require do not exist at
+  // runtime — resolve the script's own directory from import.meta instead, and
+  // run git there so the lookup doesn't depend on the caller's cwd.
+  const here = dirname(fileURLToPath(import.meta.url));
+  const git = (args: string[]): string =>
+    execFileSync("git", args, {
+      cwd: here,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  try {
+    const sha = git(["rev-parse", "--short", "HEAD"]);
+    return git(["status", "--porcelain"]) ? `${sha}-dirty` : sha;
+  } catch {
+    // Not a git checkout, or git isn't on PATH — non-fatal, just less diagnosable.
+    return "unknown";
+  }
+}
+
 async function main() {
+  console.log(
+    `[scrape] revision=${scraperRevision()} chains=${[...SCRAPE_CHAINS].join(",")} ` +
+      `today=${todayYmd()} dryRun=${DRY_RUN} fullScan=${FULL_SCAN}`
+  );
   if (FULL_SCAN) {
     console.log("[scrape] FULL_SCAN: ignoring stored horizons, scanning from today");
   }

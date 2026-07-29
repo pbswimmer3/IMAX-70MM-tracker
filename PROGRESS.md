@@ -150,6 +150,31 @@ EVIDENCE (FULL_SCAN dry run 30217415618): all 285 records are
   This signature IS bug #3; its absence is why two runs reported success while storing nothing.
 
 ## Recent Changes
+- [2026-07-29] Regal horizon fix WASN'T RUNNING: home PC never pulled (branch claude/regal-dublin-imax-dates-wcggpb).
+    * SYMPTOM after merging PR #16: Regal Dublin still capped, advancing exactly ONE day per day
+      at local midnight (Aug 10 -> Aug 11 at 12am). That cadence is a today-relative window, NOT
+      a horizon walk stopping at a real gap — old code: today+13 = Aug 11 on Jul 29 (and Aug 10
+      on Jul 28, which is precisely the original report).
+    * ROOT CAUSE: run-regal.cmd (REGAL-PC-SETUP.md) had NO `git pull`. The PC clones once at
+      setup and never updates, so merging to main changed nothing on the only machine that
+      scrapes Regal (Regal can't run on Actions — Cloudflare blocks datacenter IPs). The fix
+      was correct and merged (24aadd6, regalDateRange gone from main) but simply not executing.
+    * WHY IT WAS INVISIBLE: a stale scraper still logs `PASS — N showtimes`, still posts, still
+      gets a healthy ingest response, and still passes the heartbeat watchdog. Nothing in any
+      log distinguished "running current code" from "running months-old code".
+    * FIX 1 (visibility): scrape.ts main() prints a startup banner
+      `[scrape] revision=<short-sha>[-dirty] chains=… today=… dryRun=… fullScan=…`.
+      NOTE the scraper package is "type":"module" — __dirname/require are UNDEFINED at runtime
+      (tsx shims them only in `-e` evals, which masked this in a first pass that printed
+      revision=unknown). Resolved via fileURLToPath(import.meta.url); git runs with cwd=that dir
+      so it doesn't depend on the caller's cwd. Smoke-tested: prints the real sha.
+    * FIX 2 (prevention): run-regal.cmd gains `git -C .. pull --ff-only` + `npm install` before
+      the run. --ff-only never rewrites local work; it stops and the run continues on old code.
+    * FIX 3 (security): run-regal.cmd holds APP_URL + CRON_SECRET in plaintext, lives inside the
+      clone, and was NOT gitignored — now is. Matters more now that the clone is git-connected.
+    * REGAL-PC-SETUP.md gains a Troubleshooting section: compare the banner sha against main;
+      revision=unknown = ZIP download / no git on PATH; -dirty = local edits (also what blocks
+      --ff-only). USER ACTION: `git pull` on the PC once to pick all of this up.
 - [2026-07-29] Regal booking horizon truncated at 14 days (branch claude/regal-dublin-imax-dates-wcggpb).
     * SYMPTOM: Regal Hacienda Crossings ("Regal Dublin", 0347) dashboard topped out at Aug 10
       while tickets were really on sale through Aug 19 (checked manually).
