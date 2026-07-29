@@ -25,7 +25,8 @@
 - DEAD-BUT-KEPT (intentional): sendDropEmails/processReminderPass + Reminder model + /api/dismiss
   + /api/cron/poll are now inert (digest replaces the 3x hourly nudge). Left intact to avoid a
   destructive migration; remove in a follow-up if the nudge/dismiss flow is truly unwanted.
-- KNOWN LIMITATION: Regal drops key showDate off UTC (no queryDate); Regal is IP-deferred so N/A now.
+- ~~KNOWN LIMITATION: Regal drops key showDate off UTC (no queryDate)~~ FIXED 2026-07-29 —
+  parseRegalPayload stamps showDate from the probe's query date (see Recent Changes).
 - TESTS/CI: Vitest (test/, 19 tests) on pure modules probeHorizon/dates/digest/is70mmFormat.
   .github/workflows/test.yml runs on pull_request + push: npm ci → prisma generate → tsc → vitest
   → scraper typecheck. Root scripts: test, typecheck.
@@ -149,6 +150,35 @@ EVIDENCE (FULL_SCAN dry run 30217415618): all 285 records are
   This signature IS bug #3; its absence is why two runs reported success while storing nothing.
 
 ## Recent Changes
+- [2026-07-29] Regal booking horizon truncated at 14 days (branch claude/regal-dublin-imax-dates-wcggpb).
+    * SYMPTOM: Regal Hacienda Crossings ("Regal Dublin", 0347) dashboard topped out at Aug 10
+      while tickets were really on sale through Aug 19 (checked manually).
+    * ROOT CAUSE: scrapeRegal used a hard-coded `regalDateRange(14)` window (today..today+13).
+      AMC has walked its real horizon via probeHorizon since the redesign; Regal never did.
+      Today+13 = Aug 11 (Aug 10 from a Jul 28 run) — dates past that were NEVER REQUESTED.
+      Parsing/ingest/matching were all fine; the scraper just never asked.
+    * FIX: scrapeRegal(page, externalId, storedHorizon) now fetches ONE date per probeHorizon
+      step (still an in-page same-origin fetch, so it keeps the Cloudflare clearance cookie)
+      and returns observedHorizon. overshoot=3 for Regal vs AMC's 1 — a Regal date probe is one
+      cheap JSON fetch, not a page load + 6 scrolls, so multi-day dark stretches no longer
+      truncate the horizon. probeHorizon is now generic <T> with an optional `tag` callback
+      (defaults to the existing queryDate stamping; AMC path byte-for-byte unchanged).
+    * KNOCK-ON 1: Regal now reports observedHorizon → Theatre.horizonDate finally populates for
+      all 4 Regal theatres (pipeline.ts:137 only writes on a string; scrapeRegal returned none).
+    * KNOCK-ON 2: parseRegalPayload(payload, queryDate) stamps showDate, so Regal DropEvents key
+      off the theatre's local day instead of utcDateKey(startsAt) — a 7pm PDT show was filing as
+      the NEXT calendar day. Closes the old KNOWN LIMITATION above.
+    * It also keeps NON-70mm records (is70mm flagged per record, like normalizeAmcRecords;
+      scrape.ts filters at POST time). REQUIRED: the probe must stop on an empty DATE, not on
+      "no 70mm today" — otherwise a 70mm-free Tuesday would truncate the horizon. Test guards this.
+    * todayYmd() was UTC; the Regal scraper runs on a PT home PC where the UTC date rolls over at
+      5 PM local, so the walk would start a day late and skip that evening. Now derived in
+      America/Los_Angeles via new ymdInZone() (all 6 theatres are in CA). regalDateRange deleted.
+    * NO BACKFILL NEEDED: Regal horizonDate has always been null, so the first run starts from
+      today and reaches Aug 19 on its own. FULL_SCAN=1 not required.
+    * TESTS 62→79. New test/parseRegal.test.ts (7) + test/scraperDates.test.ts (6) + 4 probe tests
+      incl. a regression guard that a 14-day window misses a today+21 horizon. typecheck + scraper
+      typecheck + next build clean; suite verified identical under TZ=UTC/New_York/LA/Tokyo.
 - [2026-07-27] Dashboard sort + timezone fix (branch claude/70mm-showtimes-sort-timezone-pa1l1z).
     * BUG: showtimes rendered 7h ahead. `toLocaleString`/`toLocaleDateString` were called with no
       `timeZone`, so the *runtime's* zone won — UTC on Vercel — turning a 7:00 PM PDT show into

@@ -44,12 +44,12 @@ export const THEATRES: ScrapeTheatre[] = [
   },
 ];
 
-function formatYmd(date: Date): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
+// Every tracked theatre is in California (mirrors THEATRE_TIME_ZONE in
+// lib/dates.ts). The probe walk must start on the theatre's calendar day, not
+// the runner's: the Regal scraper runs on a home PC in PT, where the UTC date
+// rolls over at 5 PM local — starting from the UTC day would skip tonight's
+// showings for every run after 5 PM.
+export const THEATRE_TIME_ZONE = "America/Los_Angeles";
 
 // Adds n (possibly negative) days to a YYYY-MM-DD string, UTC-safe.
 export function addDaysYmd(ymd: string, n: number): string {
@@ -61,26 +61,20 @@ export function addDaysYmd(ymd: string, n: number): string {
   return `${year}-${month}-${day}`;
 }
 
-// Today as YYYY-MM-DD (UTC calendar date).
-export function todayYmd(): string {
-  const d = new Date();
-  const year = d.getUTCFullYear();
-  const month = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+// Calendar date YYYY-MM-DD for an instant in the given IANA zone. en-CA gives
+// ISO-ordered output directly, so no part reassembly is needed.
+export function ymdInZone(instant: Date, timeZone: string): string {
+  return instant.toLocaleDateString("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
 }
 
-// Builds the next N (default 14) YYYY-MM-DD dates starting today, used to
-// drive in-page Regal getShowtimes fetches (one call per date).
-export function regalDateRange(days = 14): string[] {
-  const dates: string[] = [];
-  const today = new Date();
-  for (let i = 0; i < days; i++) {
-    const d = new Date(today);
-    d.setDate(today.getDate() + i);
-    dates.push(formatYmd(d));
-  }
-  return dates;
+// Today as YYYY-MM-DD on the theatres' local calendar (see THEATRE_TIME_ZONE).
+export function todayYmd(): string {
+  return ymdInZone(new Date(), THEATRE_TIME_ZONE);
 }
 
 // Builds the in-page relative fetch URL for one date (used via page.evaluate,
