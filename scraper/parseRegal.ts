@@ -128,43 +128,57 @@ function extractPerformanceMeta(perf: Record<string, unknown>): {
   };
 }
 
-// Parses one or more raw getShowtimes JSON payloads (one per date fetched)
-// into normalized 70mm-only showtimes.
-export function parseRegalJson(payloads: unknown[]): NormalizedShowtimeLite[] {
+// Parses ONE date's raw getShowtimes payload into normalized showtimes.
+//
+// Returns EVERY format, not just 70mm, with is70mm flagged per record — mirroring
+// normalizeAmcRecords. Two callers depend on that: scrape.ts filters to
+// `is70mm` at POST time, and probeHorizon uses "did this date return any
+// showtimes at all" to decide where the booking window ends. If this dropped
+// non-70mm records, a day the theatre is open but happens to have no 70mm
+// screening would read as an empty date and truncate the horizon there.
+//
+// queryDate is the date we asked Regal about; it becomes showDate so DropEvents
+// key off the theatre's local calendar day instead of the UTC day of startsAt
+// (a 7:00 PM PDT show is 02:00 UTC the NEXT day).
+export function parseRegalPayload(
+  payload: unknown,
+  queryDate?: string
+): NormalizedShowtimeLite[] {
   const results: NormalizedShowtimeLite[] = [];
+  const movies = findMoviesArray(payload);
 
-  for (const payload of payloads) {
-    const movies = findMoviesArray(payload);
+  for (const movie of movies) {
+    const { title, hoCode } = extractMovieMeta(movie);
+    const performances = findPerformancesArray(movie);
 
-    for (const movie of movies) {
-      const { title, hoCode } = extractMovieMeta(movie);
-      const performances = findPerformancesArray(movie);
+    for (const perf of performances) {
+      const { id, startsAtRaw, bookingUrl, formatLabel } = extractPerformanceMeta(perf);
+      if (!startsAtRaw) continue;
 
-      for (const perf of performances) {
-        const { id, startsAtRaw, bookingUrl, formatLabel } = extractPerformanceMeta(perf);
-        if (!startsAtRaw) continue;
+      const startsAt = new Date(startsAtRaw);
+      if (Number.isNaN(startsAt.getTime())) continue;
 
-        const startsAt = new Date(startsAtRaw);
-        if (Number.isNaN(startsAt.getTime())) continue;
+      const is70mm = upperIncludes70mm(formatLabel) || upperIncludes70mm(title);
+      const externalId = id ?? `${hoCode ?? "unknown"}-${startsAt.toISOString()}`;
 
-        const is70mm =
-          upperIncludes70mm(formatLabel) || upperIncludes70mm(title);
-        if (!is70mm) continue;
-
-        const externalId = id ?? `${hoCode ?? "unknown"}-${startsAt.toISOString()}`;
-
-        results.push({
-          externalId,
-          startsAt: startsAt.toISOString(),
-          movieTitle: title,
-          movieExternalId: hoCode,
-          format: formatLabel || "70mm",
-          is70mm: true,
-          bookingUrl,
-        });
-      }
+      results.push({
+        externalId,
+        startsAt: startsAt.toISOString(),
+        movieTitle: title,
+        movieExternalId: hoCode,
+        format: formatLabel || (is70mm ? "70mm" : ""),
+        is70mm,
+        bookingUrl,
+        ...(queryDate ? { showDate: queryDate } : {}),
+      });
     }
   }
 
   return results;
+}
+
+// Parses one or more raw getShowtimes JSON payloads (one per date fetched)
+// into normalized 70mm-only showtimes.
+export function parseRegalJson(payloads: unknown[]): NormalizedShowtimeLite[] {
+  return payloads.flatMap((p) => parseRegalPayload(p)).filter((s) => s.is70mm);
 }

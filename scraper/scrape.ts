@@ -1,7 +1,7 @@
 import { chromium, type Browser } from "playwright";
-import { THEATRES, regalDateRange, regalGetShowtimesPath, todayYmd } from "./theatres";
+import { THEATRES, regalGetShowtimesPath, todayYmd } from "./theatres";
 import { normalizeAmcRecords, type RawAmcRecord } from "./parseAmc";
-import { parseRegalJson } from "./parseRegal";
+import { parseRegalPayload } from "./parseRegal";
 import { probeHorizon } from "./probe";
 import { shouldFailRun } from "./shouldFailRun";
 import { summarize70mm } from "./summarize70mm";
@@ -196,42 +196,59 @@ async function scrapeAmc(
   return { showtimes, observedHorizon: result.observedHorizon };
 }
 
+// A Regal date probe is ONE same-origin JSON fetch, versus AMC's full page load
+// + 6 scroll passes. That much lower per-date cost is why Regal tolerates a
+// longer run of empty days before declaring the booking window over: a midweek
+// dark day (or a 2-3 day gap between engagements) must not truncate the horizon.
+const REGAL_OVERSHOOT = 3;
+
 async function scrapeRegal(
   page: import("playwright").Page,
-  externalId: string
-): Promise<NormalizedShowtimeLite[]> {
-  const dates = regalDateRange(14);
-  const paths = dates.map((d) => regalGetShowtimesPath(externalId, d));
+  externalId: string,
+  storedHorizon: string | null
+): Promise<{ showtimes: NormalizedShowtimeLite[]; observedHorizon: string | null }> {
+  // Fetch one date at a time so probeHorizon can walk forward to the ACTUAL end
+  // of Regal's booking window. This previously used a hard-coded 14-day range,
+  // which silently capped every Regal theatre at today+13 — showtimes on sale
+  // beyond that were never requested, so they never appeared in the dashboard.
+  // Stays an in-page same-origin fetch: that's what carries the Cloudflare
+  // clearance cookie earned by the theatre-page load.
+  const fetchDate = async (ymd: string): Promise<NormalizedShowtimeLite[]> => {
+    const path = regalGetShowtimesPath(externalId, ymd);
+    try {
+      const payload = await page.evaluate(async (p: string) => {
+        const r = await fetch(p, { headers: { accept: "application/json" } });
+        if (!r.ok || !(r.headers.get("content-type") || "").includes("json")) return null;
+        return await r.json();
+      }, path);
+      if (payload === null || payload === undefined) return [];
+      return parseRegalPayload(payload, ymd);
+    } catch (err) {
+      console.log(
+        `[scrape][regal] ${ymd} fetch failed: ${err instanceof Error ? err.message : err}`
+      );
+      return [];
+    }
+  };
 
   await page.waitForLoadState("domcontentloaded").catch(() => {});
-  let payloads: unknown[] = [];
-  try {
-    payloads = await page.evaluate(async (paths: string[]) => {
-      const out: unknown[] = [];
-      for (const path of paths) {
-        try {
-          const r = await fetch(path, { headers: { accept: "application/json" } });
-          if (r.ok && (r.headers.get("content-type") || "").includes("json")) {
-            out.push(await r.json());
-          }
-        } catch {
-          // ignore individual date failures
-        }
-      }
-      return out;
-    }, paths);
-  } catch (err) {
-    console.log(
-      `[scrape][regal] in-page fetch failed: ${err instanceof Error ? err.message : err}`
-    );
-  }
 
-  const nonEmpty = payloads.filter((p) => p !== null && p !== undefined);
+  const result = await probeHorizon(fetchDate, {
+    today: todayYmd(),
+    storedHorizon,
+    overshoot: REGAL_OVERSHOOT,
+    // showDate is already stamped by parseRegalPayload; don't let the default
+    // tag write AMC's queryDate onto a normalized record.
+    tag: () => {},
+  });
+
+  const count70 = result.records.filter((s) => s.is70mm).length;
   console.log(
-    `[scrape][regal] fetched ${payloads.length}/${dates.length} date payloads (${nonEmpty.length} non-empty)`
+    `[scrape][regal] ${result.records.length} showtimes (${count70} are 70mm) over ` +
+      `${result.datesWithShowtimes}/${result.datesProbed.length} dates with data (horizon=${result.observedHorizon})`
   );
 
-  return parseRegalJson(payloads);
+  return { showtimes: result.records, observedHorizon: result.observedHorizon };
 }
 
 async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<TheatreResult> {
@@ -270,16 +287,13 @@ async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<
       return { theatre, showtimes: [], blocked, observedHorizon: null };
     }
 
-    let showtimes: NormalizedShowtimeLite[];
-    let observedHorizon: string | null = null;
-    if (theatre.chain === "AMC") {
-      const storedHorizon = FULL_SCAN ? null : theatre.horizonDate ?? null;
-      const result = await scrapeAmc(page, theatre.showtimesUrl, storedHorizon);
-      showtimes = result.showtimes;
-      observedHorizon = result.observedHorizon;
-    } else {
-      showtimes = await scrapeRegal(page, theatre.externalId);
-    }
+    const storedHorizon = FULL_SCAN ? null : theatre.horizonDate ?? null;
+    const result =
+      theatre.chain === "AMC"
+        ? await scrapeAmc(page, theatre.showtimesUrl, storedHorizon)
+        : await scrapeRegal(page, theatre.externalId, storedHorizon);
+    const showtimes = result.showtimes;
+    const observedHorizon = result.observedHorizon;
 
     const count70 = showtimes.filter((s) => s.is70mm).length;
     console.log(
