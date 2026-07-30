@@ -3,7 +3,13 @@ import {
   deriveRegalApiBlocked,
   resolveRegalObservedHorizon,
   shouldRotateRegalSession,
+  isFatalRegalTransportError,
+  isRegalRunBudgetExhausted,
+  computeEffectiveRegalMaxForward,
   REGAL_MAX_REQUESTS_PER_SESSION,
+  REGAL_MAX_FORWARD,
+  REGAL_HORIZON_LOOKAHEAD,
+  REGAL_RUN_DEADLINE_MS,
 } from "@/scraper/scrape";
 
 // Pure helpers pulled out of scrapeRegal() so the transport-vs-empty
@@ -64,5 +70,73 @@ describe("resolveRegalObservedHorizon", () => {
 
   it("passes null through when nothing was observed and no deadline was hit", () => {
     expect(resolveRegalObservedHorizon(null, false)).toBeNull();
+  });
+});
+
+// Classifies a whole-browser/session death (which a fresh context on the same
+// crashed browser cannot recover from) apart from an ordinary per-date
+// timeout, which just means try the next date normally.
+describe("isFatalRegalTransportError", () => {
+  it.each([
+    "Target crashed",
+    "page.evaluate: Target crashed ",
+    "page.evaluate: Target page, context or browser has been closed",
+    "Target closed",
+    "browser has been closed",
+    "Protocol error (Page.navigate): Session closed",
+  ])("treats %j as fatal", (reason) => {
+    expect(isFatalRegalTransportError(reason)).toBe(true);
+  });
+
+  it.each([
+    "page.evaluate timed out (8000ms)",
+    "http 500",
+    "non-json content-type",
+    "invalid json body",
+    "in-page fetch failed",
+    "",
+  ])("treats %j as an ordinary (non-fatal) transport failure", (reason) => {
+    expect(isFatalRegalTransportError(reason)).toBe(false);
+  });
+});
+
+describe("isRegalRunBudgetExhausted", () => {
+  it("is not exhausted while under the deadline", () => {
+    expect(isRegalRunBudgetExhausted(0, 1000)).toBe(false);
+    expect(isRegalRunBudgetExhausted(999, 1000)).toBe(false);
+  });
+
+  it("is exhausted once elapsed reaches the deadline", () => {
+    expect(isRegalRunBudgetExhausted(1000, 1000)).toBe(true);
+    expect(isRegalRunBudgetExhausted(1500, 1000)).toBe(true);
+  });
+
+  it("defaults to the production REGAL_RUN_DEADLINE_MS (10 min)", () => {
+    expect(REGAL_RUN_DEADLINE_MS).toBe(10 * 60 * 1000);
+    expect(isRegalRunBudgetExhausted(REGAL_RUN_DEADLINE_MS - 1)).toBe(false);
+    expect(isRegalRunBudgetExhausted(REGAL_RUN_DEADLINE_MS)).toBe(true);
+  });
+});
+
+describe("computeEffectiveRegalMaxForward", () => {
+  it("uses the full REGAL_MAX_FORWARD on cold start (storedHorizon null)", () => {
+    expect(computeEffectiveRegalMaxForward("2026-07-29", null)).toBe(REGAL_MAX_FORWARD);
+  });
+
+  it("bounds to storedHorizon distance + lookahead when that's under the cap", () => {
+    // storedHorizon is 10 days out; effective = 10 + 7 = 17.
+    expect(computeEffectiveRegalMaxForward("2026-07-29", "2026-08-08", 120, 7)).toBe(17);
+  });
+
+  it("never exceeds REGAL_MAX_FORWARD even with a far-future storedHorizon", () => {
+    expect(computeEffectiveRegalMaxForward("2026-07-29", "2027-01-01", 120, 7)).toBe(120);
+  });
+
+  it("floors at lookahead when storedHorizon is in the past (never negative)", () => {
+    expect(computeEffectiveRegalMaxForward("2026-07-29", "2026-07-01", 120, 7)).toBe(7);
+  });
+
+  it("the production default lookahead is 7 days", () => {
+    expect(REGAL_HORIZON_LOOKAHEAD).toBe(7);
   });
 });

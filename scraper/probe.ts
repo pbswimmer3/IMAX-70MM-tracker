@@ -26,6 +26,13 @@ export interface ProbeOptions {
   deadlineMs?: number;
   // Clock source, overridable for tests. Defaults to Date.now.
   now?: () => number;
+  // Optional early-abort check, polled before each date fetch. When it
+  // returns true the walk stops immediately without attempting the next
+  // date. Distinct from deadlineExceeded/maxForwardReached — used by Regal
+  // to fail fast once a theatre's browser session is unrecoverable rather
+  // than grinding through every remaining date with a fresh failure each
+  // time. Undefined (the default) means never abort early.
+  shouldAbort?: () => boolean;
 }
 
 export interface ProbeResult<T> {
@@ -42,6 +49,10 @@ export interface ProbeResult<T> {
   // amount. Measured 2026-07-29 — a maxForward of 60 truncated two Regal
   // theatres at exactly today+59 and reported that as their horizon.
   maxForwardReached: boolean;
+  // True if the walk stopped early because opts.shouldAbort() returned true.
+  // Like deadlineExceeded, this means observedHorizon must be treated as
+  // possibly truncated, not the real end of the booking window.
+  aborted: boolean;
 }
 
 // fetchDate(ymd) returns ALL showtime records on that local date (any format); [] = empty date.
@@ -66,6 +77,7 @@ export async function probeHorizon<T>(
   let datesWithShowtimes = 0;
   let emptyStreak = 0;
   let deadlineExceeded = false;
+  let aborted = false;
 
   let ymd = start;
   // True when the loop ran out of iterations rather than finding the end of the
@@ -73,6 +85,10 @@ export async function probeHorizon<T>(
   // demonstrably continues past it. Callers must not present it as the horizon.
   let maxForwardReached = false;
   for (let i = 0; i < maxForward; i++) {
+    if (opts.shouldAbort && opts.shouldAbort()) {
+      aborted = true;
+      break;
+    }
     if (i === maxForward - 1) maxForwardReached = true;
     if (deadlineMs !== undefined && now() - startedAt > deadlineMs) {
       deadlineExceeded = true;
@@ -111,5 +127,6 @@ export async function probeHorizon<T>(
     datesProbed,
     deadlineExceeded,
     maxForwardReached,
+    aborted,
   };
 }

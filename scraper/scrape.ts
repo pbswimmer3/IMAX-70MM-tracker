@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium, type Browser } from "playwright";
-import { THEATRES, regalGetShowtimesPath, todayYmd } from "./theatres";
+import { THEATRES, daysBetweenYmd, regalGetShowtimesPath, todayYmd } from "./theatres";
 import { normalizeAmcRecords, type RawAmcRecord } from "./parseAmc";
 import { parseRegalDatePayload, type RegalParseStats } from "./parseRegal";
 import { probeHorizon } from "./probe";
@@ -32,6 +32,15 @@ const SCRAPE_CHAINS = new Set(
 );
 // Heartbeat source label when this run scrapes Regal (drives offline alerts).
 const REGAL_SOURCE = "REGAL_PC";
+
+// Mutable holder for the current Browser instance. Regal's fatal-error
+// recovery path (see isFatalRegalTransportError) relaunches the WHOLE
+// browser, not just a context, and that new Browser must be visible to the
+// main loop for subsequent theatres too — hence a shared mutable holder
+// rather than passing `Browser` by value.
+interface BrowserHandle {
+  current: Browser;
+}
 
 interface TheatreResult {
   theatre: ScrapeTheatre;
@@ -300,6 +309,65 @@ export function shouldRotateRegalSession(requestsOnSession: number, max: number)
   return requestsOnSession >= max;
 }
 
+// Substrings of a TRANSPORT_FAIL reason that mean the whole browser/session is
+// dead, not that this one date's request merely timed out. Measured
+// 2026-08 outage: after "Target crashed"/"has been closed", every remaining
+// date in the walk failed in ~1ms and the theatre reported PASS with 0
+// showtimes — indistinguishable from a genuinely empty booking window. A
+// fresh CONTEXT on a crashed browser does not recover (one date worked, then
+// the browser was gone) — only relaunching the whole Browser does.
+const REGAL_FATAL_ERROR_SUBSTRINGS = [
+  "Target crashed",
+  "has been closed",
+  "Target closed",
+  "browser has been closed",
+  "Protocol error",
+];
+
+export function isFatalRegalTransportError(reason: string): boolean {
+  return REGAL_FATAL_ERROR_SUBSTRINGS.some((s) => reason.includes(s));
+}
+
+// Overall wall-clock budget for the whole Regal phase of a run (all
+// theatres), measured from when Regal scraping starts. The existing
+// REGAL_WALK_DEADLINE_MS (6 min) is PER THEATRE, so four theatres can reach
+// 24 min — past the 15-min Task Scheduler tick and into its 30-min kill.
+// Once this budget is exhausted, remaining theatres are skipped (not
+// scraped at all) so the run can still POST whatever it already collected
+// instead of being killed with nothing.
+export const REGAL_RUN_DEADLINE_MS = 10 * 60 * 1000;
+
+export function isRegalRunBudgetExhausted(
+  elapsedMs: number,
+  deadlineMs: number = REGAL_RUN_DEADLINE_MS
+): boolean {
+  return elapsedMs >= deadlineMs;
+}
+
+// How many days past a theatre's previously-observed horizon a run's walk is
+// allowed to advance. Regal's booking window advances roughly 1 day per day,
+// so 7 comfortably outpaces it while letting the far edge of the walk stay
+// far shorter than REGAL_MAX_FORWARD (120) on every run after the first.
+export const REGAL_HORIZON_LOOKAHEAD = 7;
+
+// Bounds a single run's walk to the known horizon plus a small lookahead
+// instead of re-probing the full REGAL_MAX_FORWARD window every 15 minutes.
+// The near window (today..storedHorizon) is still fully rescanned every run
+// — that's what catches 70mm added to dates already on sale — while the far
+// edge advances up to `lookahead` days per run. storedHorizon === null (cold
+// start / FULL_SCAN) means the true horizon is unknown, so the full
+// maxForward is used.
+export function computeEffectiveRegalMaxForward(
+  today: string,
+  storedHorizon: string | null,
+  maxForward: number = REGAL_MAX_FORWARD,
+  lookahead: number = REGAL_HORIZON_LOOKAHEAD
+): number {
+  if (storedHorizon === null) return maxForward;
+  const daysToHorizon = Math.max(0, daysBetweenYmd(today, storedHorizon));
+  return Math.min(maxForward, daysToHorizon + lookahead);
+}
+
 type RegalFetchOutcome = { ok: true; json: unknown } | { ok: false; reason: string };
 
 // Blocked means the API itself is unreachable, not merely quiet: derive it
@@ -321,7 +389,7 @@ export function resolveRegalObservedHorizon(
 }
 
 async function scrapeRegal(
-  browser: Browser,
+  browserHandle: BrowserHandle,
   initialContext: import("playwright").BrowserContext,
   initialPage: import("playwright").Page,
   name: string,
@@ -357,6 +425,11 @@ async function scrapeRegal(
   // point on the walk is treated as BLOCKED (like the initial-load challenge
   // path), not as a string of per-date transport failures.
   let sessionRotationBlocked = false;
+  // Fatal-error recovery state (FIX 1/2): at most one whole-browser relaunch
+  // is allowed per theatre. A second fatal error aborts the theatre outright
+  // rather than grinding through every remaining date with a dead browser.
+  let browserRelaunchUsed = false;
+  let theatreAborted = false;
   let datesAttempted = 0;
   let datesOkJson = 0;
   let datesTransportFail = 0;
@@ -436,7 +509,7 @@ async function scrapeRegal(
   const rotateSession = async (): Promise<boolean> => {
     const priorRequests = requestsOnSession;
     await context.close().catch(() => {});
-    const session = await openTheatreSession(browser, "regal", name, showtimesUrl);
+    const session = await openTheatreSession(browserHandle.current, "regal", name, showtimesUrl);
     context = session.context;
     page = session.page;
     requestsOnSession = 0;
@@ -451,7 +524,39 @@ async function scrapeRegal(
     return true;
   };
 
+  // FIX 1: a crashed browser is not recoverable by opening a fresh context on
+  // it (measured live — one date worked, then the browser was gone), so this
+  // tears down and relaunches the WHOLE Browser, then re-opens the theatre
+  // session on it. The new Browser is written back onto browserHandle so the
+  // caller (and any later theatres sharing the same browser) sees it too.
+  // Returns false if the fresh session on the relaunched browser is still
+  // Cloudflare-challenged, in which case the caller must abort the theatre.
+  const relaunchBrowserAndResume = async (reason: string): Promise<boolean> => {
+    console.log(`[scrape][regal] FATAL session error (${reason}) - relaunching browser`);
+    await context.close().catch(() => {});
+    await browserHandle.current.close().catch(() => {});
+    browserHandle.current = await chromium.launch({ headless: true });
+    const session = await openTheatreSession(browserHandle.current, "regal", name, showtimesUrl);
+    context = session.context;
+    page = session.page;
+    requestsOnSession = 0;
+    if (session.blocked) {
+      console.log(
+        `[scrape][regal] relaunched browser's session still BLOCKED by Cloudflare — aborting theatre`
+      );
+      return false;
+    }
+    console.log(`[scrape][regal] browser relaunched, session re-opened`);
+    return true;
+  };
+
   const fetchDate = async (ymd: string): Promise<NormalizedShowtimeLite[]> => {
+    // A prior fatal error already exhausted the one allowed relaunch: the
+    // walk is over for this theatre (probeHorizon's shouldAbort stops it on
+    // the next iteration) — don't issue more requests in the meantime.
+    if (theatreAborted) {
+      return [];
+    }
     // Once a rotation has failed to clear Cloudflare, the session is dead:
     // stop issuing requests (each would just hang until timeout) rather than
     // spamming a TRANSPORT_FAIL per remaining date.
@@ -480,6 +585,30 @@ async function scrapeRegal(
     const elapsedMs = Date.now() - startedAt;
 
     if (!outcome.ok) {
+      if (isFatalRegalTransportError(outcome.reason)) {
+        if (browserRelaunchUsed) {
+          // Second fatal error after the one allowed relaunch: abort this
+          // theatre immediately rather than grinding through the rest of the
+          // walk failing in ~1ms per date (FIX 2).
+          datesTransportFail++;
+          theatreAborted = true;
+          console.log(
+            `[scrape][regal] ${ymd}: second FATAL session error (${outcome.reason}) after the ` +
+              `one allowed browser relaunch — aborting this theatre`
+          );
+          return [];
+        }
+        browserRelaunchUsed = true;
+        const recovered = await relaunchBrowserAndResume(outcome.reason);
+        if (!recovered) {
+          datesTransportFail++;
+          theatreAborted = true;
+          return [];
+        }
+        // Resume the walk from the date that failed, on the fresh
+        // browser/session, rather than skipping it and moving on.
+        return fetchDate(ymd);
+      }
       datesTransportFail++;
       console.log(`[scrape][regal] ${ymd}: TRANSPORT_FAIL (${outcome.reason}) in ${elapsedMs}ms`);
       return [];
@@ -505,8 +634,14 @@ async function scrapeRegal(
   try {
     await page.waitForLoadState("domcontentloaded").catch(() => {});
 
+    const today = todayYmd();
+    // FIX 4: bound this run's walk to the known horizon plus a small
+    // lookahead rather than re-probing the full REGAL_MAX_FORWARD window
+    // every 15 minutes. See computeEffectiveRegalMaxForward.
+    const effectiveMaxForward = computeEffectiveRegalMaxForward(today, storedHorizon);
+
     const result = await probeHorizon(fetchDate, {
-      today: todayYmd(),
+      today,
       storedHorizon,
       overshoot: REGAL_OVERSHOOT,
       // showDate is already stamped by parseRegalDatePayload (preferring the
@@ -514,15 +649,29 @@ async function scrapeRegal(
       // let the default tag write AMC's queryDate onto a normalized record.
       tag: () => {},
       deadlineMs: REGAL_WALK_DEADLINE_MS,
-      maxForward: REGAL_MAX_FORWARD,
+      maxForward: effectiveMaxForward,
+      // FIX 2: stop the walk immediately once a fatal browser/session error
+      // is unrecoverable, instead of attempting every remaining date.
+      shouldAbort: () => theatreAborted,
     });
 
     if (result.maxForwardReached) {
-      console.log(
-        `[scrape][regal] MAX_FORWARD REACHED after ${REGAL_MAX_FORWARD} dates: ` +
-          `horizon=${result.observedHorizon} is a LOWER BOUND, not the end of the ` +
-          `booking window — Regal is still selling past it. Raise REGAL_MAX_FORWARD.`
-      );
+      if (effectiveMaxForward >= REGAL_MAX_FORWARD) {
+        console.log(
+          `[scrape][regal] MAX_FORWARD REACHED after ${REGAL_MAX_FORWARD} dates: ` +
+            `horizon=${result.observedHorizon} is a LOWER BOUND, not the end of the ` +
+            `booking window — Regal is still selling past it. Raise REGAL_MAX_FORWARD.`
+        );
+      } else {
+        // Reaching the bounded (lookahead-capped) maxForward is expected and
+        // NOT a sign REGAL_MAX_FORWARD needs raising — the walk just hasn't
+        // caught up to the true horizon yet; it will advance further next run.
+        console.log(
+          `[scrape][regal] bounded maxForward (${effectiveMaxForward} of ${REGAL_MAX_FORWARD}, ` +
+            `lookahead=${REGAL_HORIZON_LOOKAHEAD}) reached: horizon=${result.observedHorizon} is a ` +
+            `lower bound for THIS run only; will advance further next run.`
+        );
+      }
     }
 
     if (result.deadlineExceeded) {
@@ -532,15 +681,31 @@ async function scrapeRegal(
           `refusing to persist a truncated horizon`
       );
     }
-    const observedHorizon = resolveRegalObservedHorizon(result.observedHorizon, result.deadlineExceeded);
+
+    if (result.aborted) {
+      console.log(
+        `[scrape][regal] WALK ABORTED after ${result.datesProbed.length} dates ` +
+          `(${datesTransportFail} transport failures) — refusing to persist a truncated horizon`
+      );
+    }
+
+    const observedHorizon = resolveRegalObservedHorizon(
+      result.observedHorizon,
+      result.deadlineExceeded || result.aborted
+    );
 
     // A Cloudflare-blocked API can coexist with a healthy HTML page (the
     // 2026-07-25 outage class): if every attempted date failed at the
     // transport layer, treat the API itself as blocked so the caller can mark
     // the theatre BLOCKED instead of silently reporting a no-70mm night. A
     // failed mid-walk session rotation is blocked too, even if earlier dates
-    // (on the prior session) succeeded.
-    const apiBlocked = deriveRegalApiBlocked(datesAttempted, datesTransportFail) || sessionRotationBlocked;
+    // (on the prior session) succeeded. A theatre aborted after exhausting
+    // its one allowed browser relaunch (FIX 1/2) must never look like a
+    // healthy empty result either.
+    const apiBlocked =
+      deriveRegalApiBlocked(datesAttempted, datesTransportFail) ||
+      sessionRotationBlocked ||
+      theatreAborted;
 
     console.log(
       `[scrape][regal] stats: performances=${stats.performances} kept=${stats.kept} noTime=${stats.noTime} ` +
@@ -572,7 +737,7 @@ async function scrapeRegal(
   }
 }
 
-async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<TheatreResult> {
+async function scrapeTheatre(browserHandle: BrowserHandle, theatre: ScrapeTheatre): Promise<TheatreResult> {
   // Nulled out once ownership of the context is handed to scrapeRegal (which
   // rotates sessions mid-walk and closes whichever one is current itself) —
   // otherwise this function's own finally closes it.
@@ -580,7 +745,7 @@ async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<
 
   try {
     const session = await openTheatreSession(
-      browser,
+      browserHandle.current,
       theatre.chain,
       theatre.name,
       theatre.showtimesUrl
@@ -603,7 +768,7 @@ async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<
       observedHorizon = result.observedHorizon;
     } else {
       const result = await scrapeRegal(
-        browser,
+        browserHandle,
         context,
         page,
         theatre.name,
@@ -676,9 +841,15 @@ async function main() {
     console.log("[scrape] FULL_SCAN: ignoring stored horizons, scanning from today");
   }
   const theatres = await fetchTheatreConfig();
-  const browser = await chromium.launch({ headless: true });
+  const browserHandle: BrowserHandle = { current: await chromium.launch({ headless: true }) };
 
   const results: TheatreResult[] = [];
+  // FIX 3: overall budget for the Regal phase of this run (all Regal
+  // theatres combined), separate from REGAL_WALK_DEADLINE_MS which is PER
+  // THEATRE. Lazily started at the first Regal theatre so an AMC-only run
+  // (or AMC theatres preceding Regal ones) doesn't eat into the budget.
+  let regalPhaseStartedAt: number | null = null;
+  const skippedRegalTheatres: string[] = [];
 
   try {
     for (const theatre of theatres) {
@@ -689,8 +860,27 @@ async function main() {
         console.log(`[scrape] ${theatre.name}: skipped (${theatre.chain} not in SCRAPE_CHAINS)`);
         continue;
       }
+
+      if (theatre.chain === "REGAL") {
+        if (regalPhaseStartedAt === null) regalPhaseStartedAt = Date.now();
+        if (isRegalRunBudgetExhausted(Date.now() - regalPhaseStartedAt)) {
+          skippedRegalTheatres.push(theatre.name);
+          // A skipped theatre must not look like a healthy empty result:
+          // blocked=true + error keeps it out of both a false PASS and the
+          // observedHorizon getting persisted as null-meaning-"no showtimes".
+          results.push({
+            theatre,
+            showtimes: [],
+            blocked: true,
+            observedHorizon: null,
+            error: "skipped: Regal run budget exhausted",
+          });
+          continue;
+        }
+      }
+
       try {
-        const result = await scrapeTheatre(browser, theatre);
+        const result = await scrapeTheatre(browserHandle, theatre);
         results.push(result);
       } catch (err) {
         console.log(
@@ -708,7 +898,13 @@ async function main() {
       }
     }
   } finally {
-    await browser.close();
+    if (skippedRegalTheatres.length > 0) {
+      console.log(
+        `[scrape][regal] RUN BUDGET EXHAUSTED (${REGAL_RUN_DEADLINE_MS}ms) — skipped remaining ` +
+          `theatres: ${skippedRegalTheatres.join(", ")}`
+      );
+    }
+    await browserHandle.current.close().catch(() => {});
   }
 
   if (DRY_RUN) {
