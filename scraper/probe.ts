@@ -36,6 +36,12 @@ export interface ProbeResult<T> {
   // True if the walk stopped early because it exceeded opts.deadlineMs,
   // rather than because it reached maxForward or its overshoot limit.
   deadlineExceeded: boolean;
+  // Set when the walk stopped only because it ran out of maxForward iterations,
+  // i.e. it never saw the end of the booking window. observedHorizon is then a
+  // LOWER BOUND, not the horizon: the window continues past it by an unknown
+  // amount. Measured 2026-07-29 — a maxForward of 60 truncated two Regal
+  // theatres at exactly today+59 and reported that as their horizon.
+  maxForwardReached: boolean;
 }
 
 // fetchDate(ymd) returns ALL showtime records on that local date (any format); [] = empty date.
@@ -62,9 +68,15 @@ export async function probeHorizon<T>(
   let deadlineExceeded = false;
 
   let ymd = start;
+  // True when the loop ran out of iterations rather than finding the end of the
+  // booking window. observedHorizon is then only a LOWER BOUND — the window
+  // demonstrably continues past it. Callers must not present it as the horizon.
+  let maxForwardReached = false;
   for (let i = 0; i < maxForward; i++) {
+    if (i === maxForward - 1) maxForwardReached = true;
     if (deadlineMs !== undefined && now() - startedAt > deadlineMs) {
       deadlineExceeded = true;
+      maxForwardReached = false;
       break;
     }
     const recs = await fetchDate(ymd);
@@ -85,9 +97,19 @@ export async function probeHorizon<T>(
     // showtimes. Past minEnd, ordinary overshoot semantics apply — this is
     // how the walk still discovers a NEW far-edge horizon.
     const pastMinEnd = minEnd === null || ymd >= minEnd;
-    if (pastMinEnd && emptyStreak > overshoot) break;
+    if (pastMinEnd && emptyStreak > overshoot) {
+      maxForwardReached = false;
+      break;
+    }
     ymd = addDaysYmd(ymd, 1);
   }
 
-  return { records, observedHorizon, datesWithShowtimes, datesProbed, deadlineExceeded };
+  return {
+    records,
+    observedHorizon,
+    datesWithShowtimes,
+    datesProbed,
+    deadlineExceeded,
+    maxForwardReached,
+  };
 }

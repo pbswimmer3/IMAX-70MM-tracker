@@ -151,6 +151,47 @@ function extractAmcInPage(): RawAmcRecord[] {
   return out;
 }
 
+// Opens a fresh browser context, loads the theatre's showtimes page, and
+// runs the Cloudflare managed-challenge clearing/verification loop. Used both
+// for a theatre's initial session (scrapeTheatre) and for Regal's mid-walk
+// session rotation (scrapeRegal), so both paths clear Cloudflare identically.
+async function openTheatreSession(
+  browser: Browser,
+  chain: string,
+  name: string,
+  showtimesUrl: string
+): Promise<{ context: import("playwright").BrowserContext; page: import("playwright").Page; blocked: boolean }> {
+  const context = await browser.newContext({
+    userAgent: CHROME_UA,
+    viewport: { width: 1280, height: 800 },
+    locale: "en-US",
+  });
+  const page = await context.newPage();
+
+  await page.goto(showtimesUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+  let title = await page.title();
+  let bodyText = await page.evaluate(() => document.body?.innerText ?? "");
+  console.log(`[scrape][${chain}] ${name}: title="${title}"`);
+
+  let blocked = looksLikeCloudflareChallenge(title, bodyText);
+  // Cloudflare managed challenge: poll for auto-clear, reloading between tries.
+  for (let attempt = 1; blocked && attempt <= 3; attempt++) {
+    console.log(`[scrape][${chain}] ${name}: challenge (attempt ${attempt}/3), waiting`);
+    await page.waitForTimeout(7000);
+    title = await page.title();
+    bodyText = await page.evaluate(() => document.body?.innerText ?? "");
+    blocked = looksLikeCloudflareChallenge(title, bodyText);
+    if (blocked && attempt < 3) {
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+    }
+  }
+  console.log(
+    `[scrape][${chain}] ${name}: ${blocked ? "still BLOCKED" : "challenge cleared / not challenged"}`
+  );
+
+  return { context, page, blocked };
+}
+
 async function scrapeAmc(
   page: import("playwright").Page,
   baseUrl: string,
@@ -206,6 +247,13 @@ async function scrapeAmc(
 // longer run of empty days before declaring the booking window over: a midweek
 // dark day (or a 2-3 day gap between engagements) must not truncate the horizon.
 const REGAL_OVERSHOOT = 3;
+// How many dates forward the Regal walk may probe before giving up on finding
+// the end of the booking window. The shared default of 60 was NOT enough:
+// measured 2026-07-29, Hacienda Crossings and Irvine Spectrum both stopped at
+// exactly today+59 with showtimes still on sale, and reported that cut-off as
+// their horizon. A Regal date costs ~0.9s including pacing, so raising this is
+// cheap: the full 4-theatre run measured 4m06s at 60.
+export const REGAL_MAX_FORWARD = 120;
 
 // In-page fetch timeout. A stalled Regal response used to hang the in-page
 // `fetch` (and therefore the whole sequential horizon walk) forever — this
@@ -234,6 +282,23 @@ export const REGAL_WALK_DEADLINE_MS = 6 * 60 * 1000;
 // issues far more sequential requests to Regal from a single residential IP
 // than this scraper has ever made in production.
 export const REGAL_REQUEST_DELAY_MS = 500;
+// Regal enforces a request quota of ~25 per BROWSER SESSION on the
+// getShowtimes endpoint (measured live 2026-07-29): requests 1-25 on a
+// session succeed in 130-900ms; request 26+ on that SAME session hangs until
+// our timeout, forever — and retrying the same date on the same session
+// fails again. A FRESH browser context (new page load + Cloudflare
+// clearance) requesting the exact same date succeeds in ~142ms. This is a
+// per-session quota wall, not the end of the booking window — every
+// "horizon" this scraper previously reported at date #25/#26 was this wall
+// being mistaken for the real horizon. Do NOT raise this back toward 25:
+// it's a deliberate safety margin under the measured cliff.
+export const REGAL_MAX_REQUESTS_PER_SESSION = 20;
+
+// Pure decision helper (unit-testable without a browser): should the walk
+// rotate to a fresh session BEFORE issuing the next request on this one?
+export function shouldRotateRegalSession(requestsOnSession: number, max: number): boolean {
+  return requestsOnSession >= max;
+}
 
 type RegalFetchOutcome = { ok: true; json: unknown } | { ok: false; reason: string };
 
@@ -256,7 +321,10 @@ export function resolveRegalObservedHorizon(
 }
 
 async function scrapeRegal(
-  page: import("playwright").Page,
+  browser: Browser,
+  initialContext: import("playwright").BrowserContext,
+  initialPage: import("playwright").Page,
+  name: string,
   externalId: string,
   showtimesUrl: string,
   storedHorizon: string | null
@@ -275,6 +343,20 @@ async function scrapeRegal(
   // only, so a mid-window dark stretch doesn't truncate the horizon. Stays an
   // in-page same-origin fetch: that's what carries the Cloudflare clearance
   // cookie earned by the theatre-page load.
+  //
+  // Regal's ~25-request-per-session quota (see REGAL_MAX_REQUESTS_PER_SESSION)
+  // means this function owns the FULL context lifecycle for the walk, not
+  // just the one it's handed: `context`/`page` are reassigned in place as the
+  // walk rotates to fresh sessions, and this function closes whichever
+  // context is current when it returns (try/finally below) — the caller must
+  // not also close initialContext.
+  let context = initialContext;
+  let page = initialPage;
+  let requestsOnSession = 0;
+  // Set once a mid-walk session rotation fails to clear Cloudflare. From that
+  // point on the walk is treated as BLOCKED (like the initial-load challenge
+  // path), not as a string of per-date transport failures.
+  let sessionRotationBlocked = false;
   let datesAttempted = 0;
   let datesOkJson = 0;
   let datesTransportFail = 0;
@@ -346,9 +428,48 @@ async function scrapeRegal(
     return Promise.race([evaluatePromise, timeoutPromise]);
   };
 
+  // Closes the current session and opens a fresh one at the same
+  // showtimesUrl, running the same Cloudflare clearing/verification path as
+  // the initial theatre load. Returns false if the fresh session is still
+  // challenged (Cloudflare didn't clear) — the caller must treat that as
+  // BLOCKED, not as an ordinary transport failure.
+  const rotateSession = async (): Promise<boolean> => {
+    const priorRequests = requestsOnSession;
+    await context.close().catch(() => {});
+    const session = await openTheatreSession(browser, "regal", name, showtimesUrl);
+    context = session.context;
+    page = session.page;
+    requestsOnSession = 0;
+    if (session.blocked) {
+      console.log(
+        `[scrape][regal] session rotation FAILED to clear Cloudflare after ${priorRequests} ` +
+          `requests on the prior session — treating remainder of walk as BLOCKED`
+      );
+      return false;
+    }
+    console.log(`[scrape][regal] session rotated after ${priorRequests} requests`);
+    return true;
+  };
+
   const fetchDate = async (ymd: string): Promise<NormalizedShowtimeLite[]> => {
+    // Once a rotation has failed to clear Cloudflare, the session is dead:
+    // stop issuing requests (each would just hang until timeout) rather than
+    // spamming a TRANSPORT_FAIL per remaining date.
+    if (sessionRotationBlocked) {
+      return [];
+    }
+
+    if (shouldRotateRegalSession(requestsOnSession, REGAL_MAX_REQUESTS_PER_SESSION)) {
+      const rotated = await rotateSession();
+      if (!rotated) {
+        sessionRotationBlocked = true;
+        return [];
+      }
+    }
+
     const path = regalGetShowtimesPath(externalId, ymd);
     datesAttempted++;
+    requestsOnSession++;
     // Polite pacing: don't delay the first request, only between requests.
     if (datesAttempted > 1) {
       await new Promise((resolve) => setTimeout(resolve, REGAL_REQUEST_DELAY_MS));
@@ -381,88 +502,93 @@ async function scrapeRegal(
     return showtimes;
   };
 
-  await page.waitForLoadState("domcontentloaded").catch(() => {});
+  try {
+    await page.waitForLoadState("domcontentloaded").catch(() => {});
 
-  const result = await probeHorizon(fetchDate, {
-    today: todayYmd(),
-    storedHorizon,
-    overshoot: REGAL_OVERSHOOT,
-    // showDate is already stamped by parseRegalDatePayload (preferring the
-    // payload's own advertised date, falling back to the queried date); don't
-    // let the default tag write AMC's queryDate onto a normalized record.
-    tag: () => {},
-    deadlineMs: REGAL_WALK_DEADLINE_MS,
-  });
+    const result = await probeHorizon(fetchDate, {
+      today: todayYmd(),
+      storedHorizon,
+      overshoot: REGAL_OVERSHOOT,
+      // showDate is already stamped by parseRegalDatePayload (preferring the
+      // payload's own advertised date, falling back to the queried date); don't
+      // let the default tag write AMC's queryDate onto a normalized record.
+      tag: () => {},
+      deadlineMs: REGAL_WALK_DEADLINE_MS,
+      maxForward: REGAL_MAX_FORWARD,
+    });
 
-  if (result.deadlineExceeded) {
+    if (result.maxForwardReached) {
+      console.log(
+        `[scrape][regal] MAX_FORWARD REACHED after ${REGAL_MAX_FORWARD} dates: ` +
+          `horizon=${result.observedHorizon} is a LOWER BOUND, not the end of the ` +
+          `booking window — Regal is still selling past it. Raise REGAL_MAX_FORWARD.`
+      );
+    }
+
+    if (result.deadlineExceeded) {
+      console.log(
+        `[scrape][regal] DEADLINE ABORT: exceeded ${REGAL_WALK_DEADLINE_MS}ms wall-clock budget ` +
+          `after ${result.datesProbed.length} dates (${datesTransportFail} transport failures) — ` +
+          `refusing to persist a truncated horizon`
+      );
+    }
+    const observedHorizon = resolveRegalObservedHorizon(result.observedHorizon, result.deadlineExceeded);
+
+    // A Cloudflare-blocked API can coexist with a healthy HTML page (the
+    // 2026-07-25 outage class): if every attempted date failed at the
+    // transport layer, treat the API itself as blocked so the caller can mark
+    // the theatre BLOCKED instead of silently reporting a no-70mm night. A
+    // failed mid-walk session rotation is blocked too, even if earlier dates
+    // (on the prior session) succeeded.
+    const apiBlocked = deriveRegalApiBlocked(datesAttempted, datesTransportFail) || sessionRotationBlocked;
+
     console.log(
-      `[scrape][regal] DEADLINE ABORT: exceeded ${REGAL_WALK_DEADLINE_MS}ms wall-clock budget ` +
-        `after ${result.datesProbed.length} dates (${datesTransportFail} transport failures) — ` +
-        `refusing to persist a truncated horizon`
+      `[scrape][regal] stats: performances=${stats.performances} kept=${stats.kept} noTime=${stats.noTime} ` +
+        `noId=${stats.noId} dupSameStart=${stats.dupSameStart} dupDifferentStart=${stats.dupDifferentStart} ` +
+        `theatreMismatch=${stats.theatreMismatch}`
     );
+
+    const count70 = result.records.filter((s) => s.is70mm).length;
+    console.log(
+      `[scrape][regal] ${result.records.length} showtimes (${count70} are 70mm) over ` +
+        `${result.datesWithShowtimes}/${result.datesProbed.length} dates with data ` +
+        `(datesAttempted=${datesAttempted} okJson=${datesOkJson} transportFail=${datesTransportFail}, ` +
+        `horizon=${observedHorizon})`
+    );
+
+    // getShowtimes carries no per-performance purchase URL, so link to the
+    // theatre's showtimes page (same fallback AMC uses).
+    return {
+      showtimes: result.records.map((s) => ({ ...s, bookingUrl: showtimesUrl })),
+      observedHorizon,
+      apiBlocked,
+    };
+  } finally {
+    // Whichever context is current (initial, or a later rotation) — this
+    // function owns the full lifecycle, so close it here rather than leaving
+    // it for the caller. Runs every 15 minutes forever; a leaked context per
+    // rotation would accumulate indefinitely.
+    await context.close().catch(() => {});
   }
-  const observedHorizon = resolveRegalObservedHorizon(result.observedHorizon, result.deadlineExceeded);
-
-  // A Cloudflare-blocked API can coexist with a healthy HTML page (the
-  // 2026-07-25 outage class): if every attempted date failed at the
-  // transport layer, treat the API itself as blocked so the caller can mark
-  // the theatre BLOCKED instead of silently reporting a no-70mm night.
-  const apiBlocked = deriveRegalApiBlocked(datesAttempted, datesTransportFail);
-
-  console.log(
-    `[scrape][regal] stats: performances=${stats.performances} kept=${stats.kept} noTime=${stats.noTime} ` +
-      `noId=${stats.noId} dupSameStart=${stats.dupSameStart} dupDifferentStart=${stats.dupDifferentStart} ` +
-      `theatreMismatch=${stats.theatreMismatch}`
-  );
-
-  const count70 = result.records.filter((s) => s.is70mm).length;
-  console.log(
-    `[scrape][regal] ${result.records.length} showtimes (${count70} are 70mm) over ` +
-      `${result.datesWithShowtimes}/${result.datesProbed.length} dates with data ` +
-      `(datesAttempted=${datesAttempted} okJson=${datesOkJson} transportFail=${datesTransportFail}, ` +
-      `horizon=${observedHorizon})`
-  );
-
-  // getShowtimes carries no per-performance purchase URL, so link to the
-  // theatre's showtimes page (same fallback AMC uses).
-  return {
-    showtimes: result.records.map((s) => ({ ...s, bookingUrl: showtimesUrl })),
-    observedHorizon,
-    apiBlocked,
-  };
 }
 
 async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<TheatreResult> {
-  const context = await browser.newContext({
-    userAgent: CHROME_UA,
-    viewport: { width: 1280, height: 800 },
-    locale: "en-US",
-  });
-  const page = await context.newPage();
+  // Nulled out once ownership of the context is handed to scrapeRegal (which
+  // rotates sessions mid-walk and closes whichever one is current itself) —
+  // otherwise this function's own finally closes it.
+  let context: import("playwright").BrowserContext | null = null;
 
   try {
-    await page.goto(theatre.showtimesUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
-    let title = await page.title();
-    let bodyText = await page.evaluate(() => document.body?.innerText ?? "");
-    console.log(`[scrape][${theatre.chain}] ${theatre.name}: title="${title}"`);
-
-    let blocked = looksLikeCloudflareChallenge(title, bodyText);
-    // Cloudflare managed challenge: poll for auto-clear, reloading between tries.
-    for (let attempt = 1; blocked && attempt <= 3; attempt++) {
-      console.log(
-        `[scrape][${theatre.chain}] ${theatre.name}: challenge (attempt ${attempt}/3), waiting`
-      );
-      await page.waitForTimeout(7000);
-      title = await page.title();
-      bodyText = await page.evaluate(() => document.body?.innerText ?? "");
-      blocked = looksLikeCloudflareChallenge(title, bodyText);
-      if (blocked && attempt < 3) {
-        await page.reload({ waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
-      }
-    }
-    console.log(
-      `[scrape][${theatre.chain}] ${theatre.name}: ${blocked ? "still BLOCKED" : "challenge cleared / not challenged"}`
+    const session = await openTheatreSession(
+      browser,
+      theatre.chain,
+      theatre.name,
+      theatre.showtimesUrl
     );
+    context = session.context;
+    const page = session.page;
+    let blocked = session.blocked;
+
     // Skip the data fetch if still blocked (avoids context-destroyed noise).
     if (blocked) {
       return { theatre, showtimes: [], blocked, observedHorizon: null };
@@ -477,11 +603,18 @@ async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<
       observedHorizon = result.observedHorizon;
     } else {
       const result = await scrapeRegal(
+        browser,
+        context,
         page,
+        theatre.name,
         theatre.externalId,
         theatre.showtimesUrl,
         storedHorizon
       );
+      // scrapeRegal owns the context(s) it used from here on (including
+      // rotations) and closes whichever is current before returning — don't
+      // let our own finally close it again.
+      context = null;
       showtimes = result.showtimes;
       observedHorizon = result.observedHorizon;
       // OR with the existing HTML-challenge check: either signal alone means blocked.
@@ -503,7 +636,9 @@ async function scrapeTheatre(browser: Browser, theatre: ScrapeTheatre): Promise<
     console.log(`[scrape][${theatre.chain}] ${theatre.name}: ERROR — ${message}`);
     return { theatre, showtimes: [], blocked: false, observedHorizon: null, error: message };
   } finally {
-    await context.close();
+    if (context) {
+      await context.close().catch(() => {});
+    }
   }
 }
 

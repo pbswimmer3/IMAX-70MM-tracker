@@ -382,3 +382,67 @@ describe("probeHorizon", () => {
     expect(result.deadlineExceeded).toBe(false);
   });
 });
+
+describe("probeHorizon maxForwardReached", () => {
+  // The walk stopping because it ran out of iterations is NOT the same as
+  // finding the end of the booking window, but both used to produce an
+  // identical-looking observedHorizon. Measured 2026-07-29: maxForward 60 cut
+  // two Regal theatres off at today+59 while Regal was still selling tickets,
+  // and the run reported that cut-off as the horizon.
+  it("sets maxForwardReached when every probed date still has showtimes", async () => {
+    const counts: Record<string, number> = {};
+    for (let i = 0; i < 10; i++) {
+      const d = new Date(Date.UTC(2026, 6, 23));
+      d.setUTCDate(d.getUTCDate() + i);
+      counts[d.toISOString().slice(0, 10)] = 3;
+    }
+    const { fetchDate, queriedDates } = makeFetchDate(counts);
+    const res = await probeHorizon(fetchDate, {
+      today: "2026-07-23",
+      storedHorizon: null,
+      maxForward: 5,
+    });
+
+    expect(queriedDates).toHaveLength(5);
+    expect(res.maxForwardReached).toBe(true);
+    // The horizon is only a lower bound here — the window demonstrably continues.
+    expect(res.observedHorizon).toBe("2026-07-27");
+  });
+
+  it("does not set maxForwardReached when the walk ends via overshoot", async () => {
+    const { fetchDate } = makeFetchDate({
+      "2026-07-23": 2,
+      "2026-07-24": 2,
+    });
+    const res = await probeHorizon(fetchDate, {
+      today: "2026-07-23",
+      storedHorizon: null,
+      overshoot: 1,
+      maxForward: 30,
+    });
+
+    expect(res.maxForwardReached).toBe(false);
+    expect(res.observedHorizon).toBe("2026-07-24");
+  });
+
+  it("does not set maxForwardReached when the deadline aborts the walk", async () => {
+    const counts: Record<string, number> = {};
+    for (let i = 0; i < 40; i++) {
+      const d = new Date(Date.UTC(2026, 6, 23));
+      d.setUTCDate(d.getUTCDate() + i);
+      counts[d.toISOString().slice(0, 10)] = 3;
+    }
+    let clock = 0;
+    const { fetchDate } = makeFetchDate(counts);
+    const res = await probeHorizon(fetchDate, {
+      today: "2026-07-23",
+      storedHorizon: null,
+      maxForward: 30,
+      deadlineMs: 50,
+      now: () => (clock += 20),
+    });
+
+    expect(res.deadlineExceeded).toBe(true);
+    expect(res.maxForwardReached).toBe(false);
+  });
+});

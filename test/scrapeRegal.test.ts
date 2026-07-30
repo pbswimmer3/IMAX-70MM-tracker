@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { deriveRegalApiBlocked, resolveRegalObservedHorizon } from "@/scraper/scrape";
+import {
+  deriveRegalApiBlocked,
+  resolveRegalObservedHorizon,
+  shouldRotateRegalSession,
+  REGAL_MAX_REQUESTS_PER_SESSION,
+} from "@/scraper/scrape";
 
 // Pure helpers pulled out of scrapeRegal() so the transport-vs-empty
 // classification (Problem C.4) and the deadline-abort contract (Problem A.3)
@@ -22,6 +27,29 @@ describe("deriveRegalApiBlocked", () => {
 
   it("is blocked when the single attempted date failed at the transport layer", () => {
     expect(deriveRegalApiBlocked(1, 1)).toBe(true);
+  });
+});
+
+describe("shouldRotateRegalSession", () => {
+  // Regal's ~25-request-per-session quota (measured live): request 26+ on
+  // the same session hangs forever. REGAL_MAX_REQUESTS_PER_SESSION=20 is a
+  // safety margin under that cliff — rotation must trigger BEFORE the
+  // request that would hit the wall, not after.
+  it("does not rotate while under the max", () => {
+    expect(shouldRotateRegalSession(0, 20)).toBe(false);
+    expect(shouldRotateRegalSession(19, 20)).toBe(false);
+  });
+
+  it("rotates once the counter reaches the max", () => {
+    expect(shouldRotateRegalSession(20, 20)).toBe(true);
+  });
+
+  it("keeps rotating if the counter is somehow past the max", () => {
+    expect(shouldRotateRegalSession(25, 20)).toBe(true);
+  });
+
+  it("the configured production max is 20, a margin under the measured ~25 quota", () => {
+    expect(REGAL_MAX_REQUESTS_PER_SESSION).toBe(20);
   });
 });
 
