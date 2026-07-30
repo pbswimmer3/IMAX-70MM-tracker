@@ -10,7 +10,7 @@ import {
   REGAL_MAX_FORWARD,
   REGAL_HORIZON_LOOKAHEAD,
   REGAL_RUN_DEADLINE_MS,
-} from "@/scraper/scrape";
+} from "@/scraper/regalPolicy";
 
 // Pure helpers pulled out of scrapeRegal() so the transport-vs-empty
 // classification (Problem C.4) and the deadline-abort contract (Problem A.3)
