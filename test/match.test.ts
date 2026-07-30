@@ -67,4 +67,37 @@ describe("matchesMovie", () => {
   it("does not match the inert default template", () => {
     expect(matchesMovie(showtime, { matchers: INERT_DEFAULT_TEMPLATE }, "amc")).toBe(false);
   });
+
+  // Regal's getShowtimes returns MasterMovieCode uppercase; the seeded hoCodes
+  // are lowercase. An exact includes() never fired, so the id test was dead and
+  // every Regal match silently depended on titlePattern.
+  const regalShowtime: NormalizedShowtime = {
+    externalId: "105268",
+    startsAt: new Date("2026-07-28T14:00:00Z"),
+    movieTitle: "The Odyssey",
+    movieExternalId: "HO00019072",
+    format: "IMAX 70mm",
+    is70mm: true,
+  };
+
+  it("matches a Regal hoCode case-insensitively", () => {
+    expect(matchesMovie(regalShowtime, { matchers: ODYSSEY_MOVIE.matchers }, "regal")).toBe(
+      true
+    );
+  });
+
+  it("matches on hoCode alone, with no titlePattern to fall back on", () => {
+    const idOnly = { regal: { hoCodes: ["ho00019072"] } };
+    expect(matchesMovie(regalShowtime, { matchers: idOnly }, "regal")).toBe(true);
+  });
+
+  it("still rejects an unrelated hoCode", () => {
+    const other = { regal: { hoCodes: ["ho00000001"] } };
+    expect(matchesMovie(regalShowtime, { matchers: other }, "regal")).toBe(false);
+  });
+
+  it("ignores non-string entries in the id list without throwing", () => {
+    const messy = { regal: { hoCodes: [null, 42, "HO00019072"] as unknown as string[] } };
+    expect(matchesMovie(regalShowtime, { matchers: messy }, "regal")).toBe(true);
+  });
 });

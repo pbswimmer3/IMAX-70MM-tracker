@@ -61,6 +61,16 @@ export function addDaysYmd(ymd: string, n: number): string {
   return `${year}-${month}-${day}`;
 }
 
+// Whole days from `a` to `b` (b - a), both YYYY-MM-DD, UTC-safe. Negative
+// when `b` is before `a`. Used to bound the Regal walk to the known horizon
+// plus a small lookahead (see REGAL_HORIZON_LOOKAHEAD in scrape.ts) instead
+// of re-probing the full REGAL_MAX_FORWARD window on every run.
+export function daysBetweenYmd(a: string, b: string): number {
+  const da = new Date(`${a}T00:00:00Z`).getTime();
+  const db = new Date(`${b}T00:00:00Z`).getTime();
+  return Math.round((db - da) / 86400000);
+}
+
 // Calendar date YYYY-MM-DD for an instant in the given IANA zone. en-CA gives
 // ISO-ordered output directly, so no part reassembly is needed.
 export function ymdInZone(instant: Date, timeZone: string): string {

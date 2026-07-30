@@ -6,7 +6,7 @@ export interface NormalizedShowtimeLite {
   format: string;
   is70mm: boolean;
   bookingUrl?: string;
-  showDate?: string; // YYYY-MM-DD local query date
+  showDate?: string; // YYYY-MM-DD — payload's advertised show date, falling back to the query date if absent
 }
 
 export interface ScrapeTheatre {
