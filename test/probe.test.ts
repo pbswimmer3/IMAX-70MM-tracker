@@ -98,8 +98,10 @@ describe("probeHorizon", () => {
     expect(result.datesWithShowtimes).toBe(3); // 07-23, 07-24, 07-26
   });
 
-  it("lookback offsets the start", async () => {
+  it("walk starts at today even when storedHorizon is far in the future", async () => {
     const { fetchDate, queriedDates } = makeFetchDate({
+      "2026-07-23": 1,
+      "2026-07-24": 1,
       "2026-07-28": 1,
       "2026-07-29": 1,
       "2026-07-30": 0,
@@ -115,8 +117,94 @@ describe("probeHorizon", () => {
 
     const result = await probeHorizon(fetchDate, opts);
 
-    // First queried date should be 2026-07-28 (storedHorizon - lookback)
-    expect(queriedDates[0]).toBe("2026-07-28");
+    // First queried date is always today, not storedHorizon - lookback: the
+    // walk rescans the whole window so showtimes added to already-on-sale
+    // dates (e.g. 07-23/07-24) are re-discovered, not skipped forever.
+    expect(queriedDates[0]).toBe("2026-07-23");
+    expect(queriedDates).toContain("2026-07-24");
+  });
+
+  it("a gap longer than overshoot BEFORE minEnd does not stop the walk", async () => {
+    const { fetchDate, queriedDates } = makeFetchDate({
+      "2026-07-23": 1,
+      // 07-24..07-27 dark: a 4-day gap, longer than overshoot=1
+      "2026-07-28": 2,
+      "2026-07-29": 0,
+      "2026-07-30": 0,
+    });
+
+    const result = await probeHorizon(fetchDate, {
+      today: "2026-07-23",
+      storedHorizon: "2026-07-28", // minEnd
+      overshoot: 1,
+    });
+
+    // The walk pushes through the pre-minEnd gap to reach 07-28, then stops
+    // 1 day past it per ordinary overshoot semantics.
+    expect(queriedDates).toContain("2026-07-28");
+    expect(result.observedHorizon).toBe("2026-07-28");
+    expect(queriedDates).not.toContain("2026-07-31");
+  });
+
+  it("the same gap AFTER minEnd does stop the walk", async () => {
+    const { fetchDate, queriedDates } = makeFetchDate({
+      "2026-07-23": 1,
+      "2026-07-24": 2,
+      // 07-25..07-28 dark: a 4-day gap, entirely after minEnd
+      "2026-07-29": 3,
+    });
+
+    const result = await probeHorizon(fetchDate, {
+      today: "2026-07-23",
+      storedHorizon: "2026-07-24", // minEnd
+      overshoot: 1,
+    });
+
+    // Ordinary overshoot=1 termination applies once past minEnd: the walk
+    // stops 1 empty day past 07-24 and never reaches the later 07-29 data.
+    expect(result.observedHorizon).toBe("2026-07-24");
+    expect(queriedDates).not.toContain("2026-07-29");
+  });
+
+  it("minEnd null (FULL_SCAN) behaves like a plain walk from today", async () => {
+    const { fetchDate, queriedDates } = makeFetchDate({
+      "2026-07-23": 1,
+      "2026-07-24": 0,
+      "2026-07-25": 0,
+    });
+
+    const result = await probeHorizon(fetchDate, {
+      today: "2026-07-23",
+      storedHorizon: null,
+      overshoot: 1,
+    });
+
+    expect(queriedDates[0]).toBe("2026-07-23");
+    expect(result.observedHorizon).toBe("2026-07-23");
+    expect(queriedDates).not.toContain("2026-07-26");
+  });
+
+  it("a date already probed is not double-counted in records", async () => {
+    // Simulates rescanning from today across two consecutive runs: the same
+    // date is probed again but showtimes for it should not be duplicated
+    // within a single walk's result set (dedup happens per-run, not across
+    // runs — this asserts probeHorizon itself never queries a date twice in
+    // one walk).
+    const { fetchDate, queriedDates } = makeFetchDate({
+      "2026-07-23": 2,
+      "2026-07-24": 0,
+      "2026-07-25": 0,
+    });
+
+    const result = await probeHorizon(fetchDate, {
+      today: "2026-07-23",
+      storedHorizon: "2026-07-23",
+      overshoot: 1,
+    });
+
+    const occurrences = queriedDates.filter((d) => d === "2026-07-23").length;
+    expect(occurrences).toBe(1);
+    expect(result.records).toHaveLength(2);
   });
 
   it("start never before today", async () => {

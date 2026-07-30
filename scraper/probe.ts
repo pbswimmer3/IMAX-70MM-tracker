@@ -2,7 +2,17 @@ import { addDaysYmd } from "./theatres";
 
 export interface ProbeOptions {
   today: string; // YYYY-MM-DD
+  // A MINIMUM END for the walk, not a start hint: the walk always rescans
+  // the whole window starting at `today` (showtimes are routinely added to
+  // dates already on sale, not just appended at the far edge of the
+  // booking window). Until the walk passes this date, the empty-streak
+  // termination below is suppressed so a mid-window dark stretch longer
+  // than `overshoot` cannot truncate the horizon short of what was already
+  // known. null (e.g. FULL_SCAN) means no minimum: ordinary overshoot
+  // semantics apply from the very first date.
   storedHorizon: string | null; // YYYY-MM-DD or null
+  // Unused now that the walk always starts at `today`; kept for API
+  // compatibility with existing callers/tests. No-op.
   lookback?: number; // default 2
   overshoot?: number; // default 1
   maxForward?: number; // default 60
@@ -33,7 +43,6 @@ export async function probeHorizon<T>(
   fetchDate: (ymd: string) => Promise<T[]>,
   opts: ProbeOptions
 ): Promise<ProbeResult<T>> {
-  const lookback = opts.lookback ?? 2;
   const overshoot = opts.overshoot ?? 1;
   const maxForward = opts.maxForward ?? 60;
   const tag = opts.tag ?? ((rec: any, ymd: string) => (rec.queryDate = ymd));
@@ -41,8 +50,9 @@ export async function probeHorizon<T>(
   const deadlineMs = opts.deadlineMs;
   const startedAt = now();
 
-  const lookbackStart = opts.storedHorizon ? addDaysYmd(opts.storedHorizon, -lookback) : opts.today;
-  const start = opts.today > lookbackStart ? opts.today : lookbackStart;
+  // Always rescan from today — see the storedHorizon/minEnd doc comment above.
+  const start = opts.today;
+  const minEnd = opts.storedHorizon;
 
   const records: T[] = [];
   const datesProbed: string[] = [];
@@ -70,7 +80,12 @@ export async function probeHorizon<T>(
       emptyStreak++;
     }
     datesProbed.push(ymd);
-    if (emptyStreak > overshoot) break;
+    // Before minEnd, a long dark stretch must not truncate the horizon: it
+    // may just be a gap between engagements ahead of previously-known
+    // showtimes. Past minEnd, ordinary overshoot semantics apply — this is
+    // how the walk still discovers a NEW far-edge horizon.
+    const pastMinEnd = minEnd === null || ymd >= minEnd;
+    if (pastMinEnd && emptyStreak > overshoot) break;
     ymd = addDaysYmd(ymd, 1);
   }
 

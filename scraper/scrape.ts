@@ -16,10 +16,10 @@ const CHROME_UA =
 const APP_URL = process.env.APP_URL ?? "";
 const CRON_SECRET = process.env.CRON_SECRET ?? "";
 const DRY_RUN = ["true", "1", "yes"].includes((process.env.DRY_RUN ?? "").toLowerCase());
-// Escape hatch: ignore each theatre's stored booking horizon and rescan from
-// today. Needed to diagnose a suspected match/ingest bug (a dry run
-// otherwise only reaches dates near the already-stored horizon, see
-// probe.ts) and to backfill once such a bug is fixed.
+// Escape hatch: ignore each theatre's stored booking horizon entirely (no
+// minimum end, see probe.ts) rather than just passing it as a minimum end.
+// Useful for diagnosing a suspected match/ingest bug or backfilling once one
+// is fixed.
 const FULL_SCAN = process.env.FULL_SCAN === "1" || process.env.FULL_SCAN === "true";
 // Which chains this run scrapes. GitHub Actions runs "AMC" (datacenter IP is
 // fine for AMC); the home PC runs "REGAL" (needs a residential IP for Regal's
@@ -157,9 +157,11 @@ async function scrapeAmc(
   storedHorizon: string | null
 ): Promise<{ showtimes: NormalizedShowtimeLite[]; observedHorizon: string | null }> {
   // AMC's page defaults to "today" (empty at night) and lazy-renders showtimes
-  // on scroll. Probe forward from the (lookback-adjusted) stored booking horizon
-  // via ?date=YYYY-MM-DD, scroll to trigger rendering, then extract from the DOM,
-  // stopping shortly past the first empty day. Dedupe by showtimeId across dates.
+  // on scroll. Probe forward from today via ?date=YYYY-MM-DD (rescanning the
+  // whole window every run, not just the leading edge — see probe.ts), scroll
+  // to trigger rendering, then extract from the DOM. storedHorizon is passed
+  // through as a minimum end: the walk won't stop early for a mid-window dark
+  // stretch until it's passed that date. Dedupe by showtimeId across dates.
   const dateUrl = (ymd: string) =>
     `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}date=${ymd}`;
   const fetchDate = async (ymd: string): Promise<RawAmcRecord[]> => {
@@ -267,8 +269,12 @@ async function scrapeRegal(
   // of Regal's booking window. This previously used a hard-coded 14-day range,
   // which silently capped every Regal theatre at today+13 — showtimes on sale
   // beyond that were never requested, so they never appeared in the dashboard.
-  // Stays an in-page same-origin fetch: that's what carries the Cloudflare
-  // clearance cookie earned by the theatre-page load.
+  // The walk always rescans from today (not just the leading edge past
+  // storedHorizon) since 70mm showtimes are commonly ADDED to dates already on
+  // sale; storedHorizon is passed through to probeHorizon as a minimum end
+  // only, so a mid-window dark stretch doesn't truncate the horizon. Stays an
+  // in-page same-origin fetch: that's what carries the Cloudflare clearance
+  // cookie earned by the theatre-page load.
   let datesAttempted = 0;
   let datesOkJson = 0;
   let datesTransportFail = 0;
