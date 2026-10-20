@@ -14,6 +14,7 @@ Multi-file or systemic change → write `plan.md`, stop, get user confirmation b
 
 ## PROGRESS.md (root state file)
 Read at session start (if `Status: STALE` or `Exit: error/interrupted`, verify before trusting). Update after each feature/fix and before ending. Create from `PROGRESS.template.md` if missing. Keep dense and factual.
+Hard cap 4KB: one line per change, max 8 Recent Changes; move older entries to `docs/HISTORY.md` and design rationale to `docs/DECISIONS.md`. Those two are grep-only, never read whole.
 
 ## On failure
 Stop. Set PROGRESS.md `Exit: error`, log the failure + rollback target. Report what failed, files touched, rollback target. No multi-file self-repair without a new plan cycle.
